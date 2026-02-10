@@ -6,25 +6,28 @@ export async function onRequest(ctx) {
 
     // If DB binding is missing, show a clear message (prevents Error 1101 mystery)
     if (!env.DB) {
-      return page(`
+      return page(
+        `
         <div class="card err">
           <h1>DB not connected</h1>
           <p class="muted">Your Pages project does not have the D1 binding set.</p>
           <p class="muted">Fix: Pages → Settings → Functions → D1 bindings → add <b>DB</b> → select <b>beta_db</b> (for Production + Preview).</p>
         </div>
-      `, 500);
+      `,
+        500
+      );
     }
 
- // ---------- Helpers ----------
-const nowISO = () => new Date().toISOString();
-const uuid = () => crypto.randomUUID();
+    // ---------- Helpers ----------
+    const nowISO = () => new Date().toISOString();
+    const uuid = () => crypto.randomUUID();
 
-// "pepper" (server secret) helps a bit even with lower iterations
-const PEPPER = env.APP_SECRET || "";
-
+    // "pepper" (server secret) helps a bit even with lower iterations
+    const PEPPER = env.APP_SECRET || "";
 
     function page(body, status = 200, headers = {}) {
-      return new Response(`<!doctype html><html><head>
+      return new Response(
+        `<!doctype html><html><head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Beta</title>
@@ -46,10 +49,12 @@ const PEPPER = env.APP_SECRET || "";
   .err{background:#fff3f3;border:1px solid rgba(255,0,0,.18);padding:10px;border-radius:10px}
   .ok{background:#f0fff8;border:1px solid rgba(0,200,120,.18);padding:10px;border-radius:10px}
 </style>
-</head><body><div class="wrap">${body}</div></body></html>`, {
-        status,
-        headers: { "content-type": "text/html; charset=utf-8", ...headers },
-      });
+</head><body><div class="wrap">${body}</div></body></html>`,
+        {
+          status,
+          headers: { "content-type": "text/html; charset=utf-8", ...headers },
+        }
+      );
     }
 
     const redirect = (to, headers = {}) =>
@@ -65,6 +70,13 @@ const PEPPER = env.APP_SECRET || "";
 
     const escapeAttr = (s) => escapeHtml(s).replaceAll("`", "&#096;");
 
+    const roleLabel = (r) => {
+      if (r === "SCHOOL_ADMIN") return "School Admin";
+      if (r === "TEACHER") return "Teacher";
+      if (r === "STUDENT") return "Student";
+      return r || "";
+    };
+
     async function form() {
       const fd = await request.formData();
       const out = {};
@@ -73,18 +85,22 @@ const PEPPER = env.APP_SECRET || "";
     }
 
     // --- crypto helpers ---
-    const toHex = (buf) => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+    const toHex = (buf) =>
+      [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+
     const sha256Hex = async (text) => {
       const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
       return toHex(digest);
     };
+
     const randomSaltHex = () => {
       const a = new Uint8Array(16);
       crypto.getRandomValues(a);
       return toHex(a.buffer);
     };
+
     const pbkdf2Hex = async (password, saltHex, iterations) => {
-      const salt = Uint8Array.from(saltHex.match(/../g).map(x => parseInt(x, 16)));
+      const salt = Uint8Array.from(saltHex.match(/../g).map((x) => parseInt(x, 16)));
       const keyMaterial = await crypto.subtle.importKey(
         "raw",
         new TextEncoder().encode(password),
@@ -111,22 +127,21 @@ const PEPPER = env.APP_SECRET || "";
       }
       return null;
     };
+
     const cookieSet = (name, value, maxAgeSec) =>
       `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAgeSec}`;
-    const cookieClear = (name) =>
-      `${name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
+
+    const cookieClear = (name) => `${name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
 
     // --- DB helpers ---
-    const first = async (sql, params = []) =>
-      await env.DB.prepare(sql).bind(...params).first();
+    const first = async (sql, params = []) => await env.DB.prepare(sql).bind(...params).first();
 
     const all = async (sql, params = []) => {
       const res = await env.DB.prepare(sql).bind(...params).all();
       return res.results || [];
     };
 
-    const run = async (sql, params = []) =>
-      await env.DB.prepare(sql).bind(...params).run();
+    const run = async (sql, params = []) => await env.DB.prepare(sql).bind(...params).run();
 
     // --- auth load ---
     async function loadAuth() {
@@ -172,14 +187,17 @@ const PEPPER = env.APP_SECRET || "";
     function pickActiveMembership(a) {
       const tid = a.session?.active_tenant_id;
       if (!tid) return null;
-      return a.memberships.find(m => m.tenant_id === tid) || null;
+      return a.memberships.find((m) => m.tenant_id === tid) || null;
     }
 
     // ---------- Routes ----------
     if (path === "/health") {
-      // quick test that DB works
       const row = await first("SELECT COUNT(*) AS n FROM users", []);
-      return page(`<div class="card"><h1>OK</h1><p class="muted">Users count: ${escapeHtml(row?.n ?? 0)}</p></div>`);
+      return page(
+        `<div class="card"><h1>OK</h1><p class="muted">Users count: ${escapeHtml(
+          row?.n ?? 0
+        )}</p></div>`
+      );
     }
 
     if (path === "/") {
@@ -190,7 +208,8 @@ const PEPPER = env.APP_SECRET || "";
 
       const active = pickActiveMembership(a);
       if (!active) {
-        if (a.memberships.length === 1) return redirect(`/switch-school?tenant_id=${encodeURIComponent(a.memberships[0].tenant_id)}`);
+        if (a.memberships.length === 1)
+          return redirect(`/switch-school?tenant_id=${encodeURIComponent(a.memberships[0].tenant_id)}`);
         return redirect("/choose-school");
       }
 
@@ -246,12 +265,15 @@ const PEPPER = env.APP_SECRET || "";
         const password = (f.password || "");
 
         if (!name || !email || password.length < 6) {
-          return page(`<div class="card err"><b>Check inputs.</b> Password must be 6+ characters.</div><p><a href="/setup">Back</a></p>`, 400);
+          return page(
+            `<div class="card err"><b>Check inputs.</b> Password must be 6+ characters.</div><p><a href="/setup">Back</a></p>`,
+            400
+          );
         }
 
         const saltHex = randomSaltHex();
         const iter = 40000;
-const hashHex = await pbkdf2Hex(password + "|" + PEPPER, saltHex, iter);
+        const hashHex = await pbkdf2Hex(password + "|" + PEPPER, saltHex, iter);
         const id = uuid();
         const ts = nowISO();
 
@@ -294,11 +316,18 @@ const hashHex = await pbkdf2Hex(password + "|" + PEPPER, saltHex, iter);
           "SELECT id,email,name,password_salt,password_hash,password_iter,is_system_admin FROM users WHERE email=? AND status='ACTIVE'",
           [email]
         );
-        if (!u) return page(`<div class="card err"><b>Wrong email or password.</b></div><p><a href="/login">Try again</a></p>`, 401);
+        if (!u)
+          return page(
+            `<div class="card err"><b>Wrong email or password.</b></div><p><a href="/login">Try again</a></p>`,
+            401
+          );
 
-const check = await pbkdf2Hex(password + "|" + PEPPER, u.password_salt, Number(u.password_iter));
+        const check = await pbkdf2Hex(password + "|" + PEPPER, u.password_salt, Number(u.password_iter));
         if (check !== u.password_hash) {
-          return page(`<div class="card err"><b>Wrong email or password.</b></div><p><a href="/login">Try again</a></p>`, 401);
+          return page(
+            `<div class="card err"><b>Wrong email or password.</b></div><p><a href="/login">Try again</a></p>`,
+            401
+          );
         }
 
         const token = uuid() + "-" + uuid();
@@ -313,8 +342,33 @@ const check = await pbkdf2Hex(password + "|" + PEPPER, u.password_salt, Number(u
 
         const headers = { "Set-Cookie": cookieSet("qa_sess", token, 60 * 60 * 24 * 7) };
 
+        // System Admin: go straight to system dashboard
         if (Number(u.is_system_admin) === 1) return redirect("/sys", headers);
-        return redirect("/", headers);
+
+        // Non-system users: route smartly
+        const mems = await all(
+          `SELECT m.tenant_id, m.role, t.name AS tenant_name
+           FROM memberships m
+           JOIN tenants t ON t.id = m.tenant_id
+           WHERE m.user_id=? AND m.status='ACTIVE' AND t.status='ACTIVE'
+           ORDER BY t.name ASC`,
+          [u.id]
+        );
+
+        if (!mems.length) return redirect("/no-access", headers);
+
+        // If exactly 1 school, set active school immediately and go straight to the correct dashboard
+        if (mems.length === 1) {
+          await run("UPDATE sessions SET active_tenant_id=? WHERE token_hash=?", [mems[0].tenant_id, tokenHash]);
+
+          if (mems[0].role === "SCHOOL_ADMIN") return redirect("/school", headers);
+          if (mems[0].role === "TEACHER") return redirect("/teacher", headers);
+          if (mems[0].role === "STUDENT") return redirect("/student", headers);
+          return redirect("/no-access", headers);
+        }
+
+        // Multiple schools
+        return redirect("/choose-school", headers);
       }
     }
 
@@ -335,24 +389,37 @@ const check = await pbkdf2Hex(password + "|" + PEPPER, u.password_salt, Number(u
 
       if (Number(r.user.is_system_admin) === 1) return redirect("/sys");
       if (!r.memberships.length) return redirect("/no-access");
+
+      // If only one membership, no need for this page
       if (r.memberships.length === 1) {
         return redirect(`/switch-school?tenant_id=${encodeURIComponent(r.memberships[0].tenant_id)}`);
       }
 
-      const cards = r.memberships.map(m => `
-        <div class="card">
-          <div class="topbar">
-            <div>
-              <div><b>${escapeHtml(m.tenant_name)}</b></div>
-              <div class="muted">Role: <span class="pill">${escapeHtml(m.role)}</span></div>
+      const activeNow = pickActiveMembership(r);
+      const activeId = activeNow ? activeNow.tenant_id : null;
+
+      const cards = r.memberships
+        .map((m) => {
+          const isCurrent = activeId && m.tenant_id === activeId;
+          return `
+            <div class="card">
+              <div class="topbar">
+                <div>
+                  <div><b>${escapeHtml(m.tenant_name)}</b></div>
+                  <div class="muted">
+                    Role: <span class="pill">${escapeHtml(roleLabel(m.role))}</span>
+                    ${isCurrent ? `<span class="pill">Current</span>` : ``}
+                  </div>
+                </div>
+                <form method="post" action="/switch-school">
+                  <input type="hidden" name="tenant_id" value="${escapeAttr(m.tenant_id)}"/>
+                  <button type="submit">${isCurrent ? "Open" : "Switch"}</button>
+                </form>
+              </div>
             </div>
-            <form method="post" action="/switch-school">
-              <input type="hidden" name="tenant_id" value="${escapeAttr(m.tenant_id)}"/>
-              <button type="submit">Open</button>
-            </form>
-          </div>
-        </div>
-      `).join("");
+          `;
+        })
+        .join("");
 
       return page(`
         <div class="card">
@@ -375,7 +442,7 @@ const check = await pbkdf2Hex(password + "|" + PEPPER, u.password_salt, Number(u
         tenantId = (f.tenant_id || tenantId).trim();
       }
 
-      const membership = r.memberships.find(m => m.tenant_id === tenantId);
+      const membership = r.memberships.find((m) => m.tenant_id === tenantId);
       if (!membership) return redirect("/choose-school");
 
       const token = cookieGet("qa_sess");
@@ -392,7 +459,9 @@ const check = await pbkdf2Hex(password + "|" + PEPPER, u.password_salt, Number(u
       if (Number(r.user.is_system_admin) !== 1) return redirect("/");
 
       const tenants = await all("SELECT id,name,status FROM tenants ORDER BY name ASC", []);
-      const list = tenants.map(t => `<li>${escapeHtml(t.name)} <span class="muted">(${escapeHtml(t.status)})</span></li>`).join("");
+      const list = tenants
+        .map((t) => `<li>${escapeHtml(t.name)} <span class="muted">(${escapeHtml(t.status)})</span></li>`)
+        .join("");
 
       return page(`
         <div class="card">
@@ -441,13 +510,21 @@ const check = await pbkdf2Hex(password + "|" + PEPPER, u.password_salt, Number(u
       const adminPassword = (f.admin_password || "");
 
       if (!tenantName || !adminName || !adminEmail || adminPassword.length < 6) {
-        return page(`<div class="card err"><b>Check inputs.</b> Password must be 6+ characters.</div><p><a href="/sys">Back</a></p>`, 400);
+        return page(
+          `<div class="card err"><b>Check inputs.</b> Password must be 6+ characters.</div><p><a href="/sys">Back</a></p>`,
+          400
+        );
       }
 
       const tenantId = uuid();
       const ts = nowISO();
 
-      await run("INSERT INTO tenants (id,name,status,created_at,updated_at) VALUES (?,?, 'ACTIVE', ?, ?)", [tenantId, tenantName, ts, ts]);
+      await run("INSERT INTO tenants (id,name,status,created_at,updated_at) VALUES (?,?, 'ACTIVE', ?, ?)", [
+        tenantId,
+        tenantName,
+        ts,
+        ts,
+      ]);
 
       let u = await first("SELECT id FROM users WHERE email=? AND status='ACTIVE'", [adminEmail]);
       let userId = u?.id;
@@ -455,7 +532,7 @@ const check = await pbkdf2Hex(password + "|" + PEPPER, u.password_salt, Number(u
       if (!userId) {
         const saltHex = randomSaltHex();
         const iter = 40000;
-const hashHex = await pbkdf2Hex(adminPassword + "|" + PEPPER, saltHex, iter);
+        const hashHex = await pbkdf2Hex(adminPassword + "|" + PEPPER, saltHex, iter);
         userId = uuid();
         await run(
           "INSERT INTO users (id,email,name,password_salt,password_hash,password_iter,is_system_admin,status,created_at,updated_at) VALUES (?,?,?,?,?,?,0,'ACTIVE',?,?)",
@@ -493,25 +570,44 @@ const hashHex = await pbkdf2Hex(adminPassword + "|" + PEPPER, saltHex, iter);
 
       const courses = await all("SELECT id,title,status FROM courses WHERE tenant_id=? ORDER BY title ASC", [tenantId]);
 
-      const teachers = members.filter(x => x.role === "TEACHER");
-      const students = members.filter(x => x.role === "STUDENT");
+      const teachers = members.filter((x) => x.role === "TEACHER");
+      const students = members.filter((x) => x.role === "STUDENT");
 
-      const memberList = members.map(x => `<li><b>${escapeHtml(x.name)}</b> — ${escapeHtml(x.email)} <span class="pill">${escapeHtml(x.role)}</span></li>`).join("");
-      const courseList = courses.map(c => `<li><b>${escapeHtml(c.title)}</b> <span class="muted">(${escapeHtml(c.status)})</span></li>`).join("");
+      const memberList = members
+        .map(
+          (x) =>
+            `<li><b>${escapeHtml(x.name)}</b> — ${escapeHtml(x.email)} <span class="pill">${escapeHtml(
+              roleLabel(x.role)
+            )}</span></li>`
+        )
+        .join("");
 
-      const teacherOptions = teachers.map(t => `<option value="${escapeAttr(t.id)}">${escapeHtml(t.name)} (${escapeHtml(t.email)})</option>`).join("");
-      const studentOptions = students.map(s => `<option value="${escapeAttr(s.id)}">${escapeHtml(s.name)} (${escapeHtml(s.email)})</option>`).join("");
-      const courseOptions = courses.map(c => `<option value="${escapeAttr(c.id)}">${escapeHtml(c.title)}</option>`).join("");
+      const courseList = courses
+        .map((c) => `<li><b>${escapeHtml(c.title)}</b> <span class="muted">(${escapeHtml(c.status)})</span></li>`)
+        .join("");
+
+      const teacherOptions = teachers
+        .map((t) => `<option value="${escapeAttr(t.id)}">${escapeHtml(t.name)} (${escapeHtml(t.email)})</option>`)
+        .join("");
+
+      const studentOptions = students
+        .map((s) => `<option value="${escapeAttr(s.id)}">${escapeHtml(s.name)} (${escapeHtml(s.email)})</option>`)
+        .join("");
+
+      const courseOptions = courses.map((c) => `<option value="${escapeAttr(c.id)}">${escapeHtml(c.title)}</option>`).join("");
 
       return page(`
         <div class="card">
           <div class="topbar">
             <div>
               <h1>School Admin</h1>
-              <div class="muted">${escapeHtml(active.tenant_name)}</div>
+              <div class="muted">
+                <span class="pill">${escapeHtml(active.tenant_name)}</span>
+                <span class="pill">${escapeHtml(roleLabel(active.role))}</span>
+              </div>
             </div>
             <div style="display:flex;gap:10px;align-items:center">
-              <a href="/choose-school">Switch school</a>
+              ${r.memberships.length > 1 ? `<a href="/choose-school">Switch school</a>` : ``}
               <a href="/logout">Logout</a>
             </div>
           </div>
@@ -591,7 +687,10 @@ const hashHex = await pbkdf2Hex(adminPassword + "|" + PEPPER, saltHex, iter);
       const password = (f.password || "");
 
       if (!name || !email || !["TEACHER", "STUDENT"].includes(role) || password.length < 6) {
-        return page(`<div class="card err"><b>Check inputs.</b> Password must be 6+ characters.</div><p><a href="/school">Back</a></p>`, 400);
+        return page(
+          `<div class="card err"><b>Check inputs.</b> Password must be 6+ characters.</div><p><a href="/school">Back</a></p>`,
+          400
+        );
       }
 
       const ts = nowISO();
@@ -602,7 +701,7 @@ const hashHex = await pbkdf2Hex(adminPassword + "|" + PEPPER, saltHex, iter);
       if (!userId) {
         const saltHex = randomSaltHex();
         const iter = 40000;
-const hashHex = await pbkdf2Hex(password + "|" + PEPPER, saltHex, iter);
+        const hashHex = await pbkdf2Hex(password + "|" + PEPPER, saltHex, iter);
         userId = uuid();
         await run(
           "INSERT INTO users (id,email,name,password_salt,password_hash,password_iter,is_system_admin,status,created_at,updated_at) VALUES (?,?,?,?,?,?,0,'ACTIVE',?,?)",
@@ -610,7 +709,6 @@ const hashHex = await pbkdf2Hex(password + "|" + PEPPER, saltHex, iter);
         );
       }
 
-      // add membership (ignore if already exists)
       try {
         await run(
           "INSERT INTO memberships (id,user_id,tenant_id,role,status,created_at,updated_at) VALUES (?,?,?,?,'ACTIVE',?,?)",
@@ -633,10 +731,13 @@ const hashHex = await pbkdf2Hex(password + "|" + PEPPER, saltHex, iter);
       if (!title) return redirect("/school");
 
       const ts = nowISO();
-      await run(
-        "INSERT INTO courses (id,tenant_id,title,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',?,?)",
-        [uuid(), active.tenant_id, title, ts, ts]
-      );
+      await run("INSERT INTO courses (id,tenant_id,title,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',?,?)", [
+        uuid(),
+        active.tenant_id,
+        title,
+        ts,
+        ts,
+      ]);
 
       return redirect("/school");
     }
@@ -652,15 +753,25 @@ const hashHex = await pbkdf2Hex(password + "|" + PEPPER, saltHex, iter);
       const courseId = (f.course_id || "");
       const teacherId = (f.teacher_id || "");
 
-      // course must belong to this tenant
-      const c = await first("SELECT id FROM courses WHERE id=? AND tenant_id=? AND status='ACTIVE'", [courseId, active.tenant_id]);
+      const c = await first("SELECT id FROM courses WHERE id=? AND tenant_id=? AND status='ACTIVE'", [
+        courseId,
+        active.tenant_id,
+      ]);
       if (!c) return redirect("/school");
 
-      // user must be a TEACHER in this tenant
-      const m = await first("SELECT id FROM memberships WHERE user_id=? AND tenant_id=? AND role='TEACHER' AND status='ACTIVE'", [teacherId, active.tenant_id]);
+      const m = await first(
+        "SELECT id FROM memberships WHERE user_id=? AND tenant_id=? AND role='TEACHER' AND status='ACTIVE'",
+        [teacherId, active.tenant_id]
+      );
       if (!m) return redirect("/school");
 
-      try { await run("INSERT INTO course_teachers (course_id,user_id,created_at) VALUES (?,?,?)", [courseId, teacherId, nowISO()]); } catch (e) {}
+      try {
+        await run("INSERT INTO course_teachers (course_id,user_id,created_at) VALUES (?,?,?)", [
+          courseId,
+          teacherId,
+          nowISO(),
+        ]);
+      } catch (e) {}
       return redirect("/school");
     }
 
@@ -675,13 +786,25 @@ const hashHex = await pbkdf2Hex(password + "|" + PEPPER, saltHex, iter);
       const courseId = (f.course_id || "");
       const studentId = (f.student_id || "");
 
-      const c = await first("SELECT id FROM courses WHERE id=? AND tenant_id=? AND status='ACTIVE'", [courseId, active.tenant_id]);
+      const c = await first("SELECT id FROM courses WHERE id=? AND tenant_id=? AND status='ACTIVE'", [
+        courseId,
+        active.tenant_id,
+      ]);
       if (!c) return redirect("/school");
 
-      const m = await first("SELECT id FROM memberships WHERE user_id=? AND tenant_id=? AND role='STUDENT' AND status='ACTIVE'", [studentId, active.tenant_id]);
+      const m = await first(
+        "SELECT id FROM memberships WHERE user_id=? AND tenant_id=? AND role='STUDENT' AND status='ACTIVE'",
+        [studentId, active.tenant_id]
+      );
       if (!m) return redirect("/school");
 
-      try { await run("INSERT INTO enrollments (course_id,user_id,created_at) VALUES (?,?,?)", [courseId, studentId, nowISO()]); } catch (e) {}
+      try {
+        await run("INSERT INTO enrollments (course_id,user_id,created_at) VALUES (?,?,?)", [
+          courseId,
+          studentId,
+          nowISO(),
+        ]);
+      } catch (e) {}
       return redirect("/school");
     }
 
@@ -708,17 +831,20 @@ const hashHex = await pbkdf2Hex(password + "|" + PEPPER, saltHex, iter);
           <div class="topbar">
             <div>
               <h1>Teacher</h1>
-              <div class="muted">${escapeHtml(active.tenant_name)}</div>
+              <div class="muted">
+                <span class="pill">${escapeHtml(active.tenant_name)}</span>
+                <span class="pill">${escapeHtml(roleLabel(active.role))}</span>
+              </div>
             </div>
             <div style="display:flex;gap:10px;align-items:center">
-              <a href="/choose-school">Switch school</a>
+              ${r.memberships.length > 1 ? `<a href="/choose-school">Switch school</a>` : ``}
               <a href="/logout">Logout</a>
             </div>
           </div>
         </div>
         <div class="card">
           <h2>My assigned courses</h2>
-          <ul>${rows.map(x => `<li>${escapeHtml(x.title)}</li>`).join("") || "<li class='muted'>None yet</li>"}</ul>
+          <ul>${rows.map((x) => `<li>${escapeHtml(x.title)}</li>`).join("") || "<li class='muted'>None yet</li>"}</ul>
         </div>
       `);
     }
@@ -746,32 +872,36 @@ const hashHex = await pbkdf2Hex(password + "|" + PEPPER, saltHex, iter);
           <div class="topbar">
             <div>
               <h1>Student</h1>
-              <div class="muted">${escapeHtml(active.tenant_name)}</div>
+              <div class="muted">
+                <span class="pill">${escapeHtml(active.tenant_name)}</span>
+                <span class="pill">${escapeHtml(roleLabel(active.role))}</span>
+              </div>
             </div>
             <div style="display:flex;gap:10px;align-items:center">
-              <a href="/choose-school">Switch school</a>
+              ${r.memberships.length > 1 ? `<a href="/choose-school">Switch school</a>` : ``}
               <a href="/logout">Logout</a>
             </div>
           </div>
         </div>
         <div class="card">
           <h2>My enrolled courses</h2>
-          <ul>${rows.map(x => `<li>${escapeHtml(x.title)}</li>`).join("") || "<li class='muted'>None yet</li>"}</ul>
+          <ul>${rows.map((x) => `<li>${escapeHtml(x.title)}</li>`).join("") || "<li class='muted'>None yet</li>"}</ul>
         </div>
       `);
     }
 
-    return page(`
+    return page(
+      `
       <div class="card">
         <h1>Not found</h1>
         <p class="muted">Try <a href="/setup">/setup</a> or <a href="/login">/login</a>.</p>
       </div>
-    `, 404);
-
-} catch (err) {
-  console.error("FATAL", err);
-  const msg = (err && err.stack) ? err.stack : String(err);
-  return new Response("FATAL ERROR:\n\n" + msg, { status: 500 });
-}
-
+    `,
+      404
+    );
+  } catch (err) {
+    console.error("FATAL", err);
+    const msg = err && err.stack ? err.stack : String(err);
+    return new Response("FATAL ERROR:\n\n" + msg, { status: 500 });
+  }
 }
