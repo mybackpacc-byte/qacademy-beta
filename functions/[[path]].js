@@ -15,9 +15,13 @@ export async function onRequest(ctx) {
       `, 500);
     }
 
-    // ---------- Helpers ----------
-    const nowISO = () => new Date().toISOString();
-    const uuid = () => crypto.randomUUID();
+ // ---------- Helpers ----------
+const nowISO = () => new Date().toISOString();
+const uuid = () => crypto.randomUUID();
+
+// "pepper" (server secret) helps a bit even with lower iterations
+const PEPPER = env.APP_SECRET || "";
+
 
     function page(body, status = 200, headers = {}) {
       return new Response(`<!doctype html><html><head>
@@ -246,8 +250,8 @@ export async function onRequest(ctx) {
         }
 
         const saltHex = randomSaltHex();
-        const iter = 150000;
-        const hashHex = await pbkdf2Hex(password, saltHex, iter);
+        const iter = 40000;
+const hashHex = await pbkdf2Hex(password + "|" + PEPPER, saltHex, iter);
         const id = uuid();
         const ts = nowISO();
 
@@ -292,7 +296,7 @@ export async function onRequest(ctx) {
         );
         if (!u) return page(`<div class="card err"><b>Wrong email or password.</b></div><p><a href="/login">Try again</a></p>`, 401);
 
-        const check = await pbkdf2Hex(password, u.password_salt, Number(u.password_iter));
+const check = await pbkdf2Hex(password + "|" + PEPPER, u.password_salt, Number(u.password_iter));
         if (check !== u.password_hash) {
           return page(`<div class="card err"><b>Wrong email or password.</b></div><p><a href="/login">Try again</a></p>`, 401);
         }
@@ -450,8 +454,8 @@ export async function onRequest(ctx) {
 
       if (!userId) {
         const saltHex = randomSaltHex();
-        const iter = 150000;
-        const hashHex = await pbkdf2Hex(adminPassword, saltHex, iter);
+        const iter = 40000;
+const hashHex = await pbkdf2Hex(adminPassword + "|" + PEPPER, saltHex, iter);
         userId = uuid();
         await run(
           "INSERT INTO users (id,email,name,password_salt,password_hash,password_iter,is_system_admin,status,created_at,updated_at) VALUES (?,?,?,?,?,?,0,'ACTIVE',?,?)",
@@ -597,8 +601,8 @@ export async function onRequest(ctx) {
 
       if (!userId) {
         const saltHex = randomSaltHex();
-        const iter = 150000;
-        const hashHex = await pbkdf2Hex(password, saltHex, iter);
+        const iter = 40000;
+const hashHex = await pbkdf2Hex(password + "|" + PEPPER, saltHex, iter);
         userId = uuid();
         await run(
           "INSERT INTO users (id,email,name,password_salt,password_hash,password_iter,is_system_admin,status,created_at,updated_at) VALUES (?,?,?,?,?,?,0,'ACTIVE',?,?)",
@@ -764,8 +768,10 @@ export async function onRequest(ctx) {
       </div>
     `, 404);
 
-  } catch (err) {
-    console.error("FATAL", err);
-    return new Response("Worker error. Check Functions logs for details.", { status: 500 });
-  }
+} catch (err) {
+  console.error("FATAL", err);
+  const msg = (err && err.stack) ? err.stack : String(err);
+  return new Response("FATAL ERROR:\n\n" + msg, { status: 500 });
+}
+
 }
