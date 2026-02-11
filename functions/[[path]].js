@@ -1,4 +1,5 @@
-import { handleRequest } from "/.app.js";
+// functions/[[path]].js
+import { handleRequest } from "./app.js";
 
 export async function onRequest(ctx) {
   return handleRequest(ctx);
