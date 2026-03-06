@@ -398,7 +398,7 @@ export async function handleExamRequest(ctx) {
           <div class="tabs">
             <button class="tab ${activePane === "settings" ? "active" : ""}" onclick="showPane('settings',this)">Settings</button>
             <button class="tab ${activePane === "questions" ? "active" : ""}" onclick="showPane('questions',this)">Questions</button>
-            <button class="tab" onclick="showPane('publish',this)">Publish</button>
+            <button class="tab ${activePane === "publish" ? "active" : ""}" onclick="showPane('publish',this)">Publish</button>
             <button class="tab" onclick="showPane('access',this)">Access</button>
             <button class="tab" onclick="showPane('results',this)">Results</button>
           </div>
@@ -590,10 +590,94 @@ export async function handleExamRequest(ctx) {
           </div>
         </div>
 
-        <!-- ===== OTHER PANES ===== -->
-        <div id="pane-publish" class="pane">
-          <div class="card"><h2>Publish</h2><p class="muted">Coming soon.</p></div>
+        <!-- ===== PUBLISH PANE ===== -->
+        <div id="pane-publish" class="pane ${activePane === "publish" ? "active" : ""}">
+
+          <!-- Section 1: Publish Exam -->
+          <div class="card">
+            <div class="section-title">Publish Exam</div>
+            <table style="width:100%;font-size:14px;border-collapse:collapse">
+              <tr>
+                <td style="padding:6px 0;color:rgba(0,0,0,.45);width:160px">Questions</td>
+                <td style="padding:6px 0;font-weight:600">${questions.length}</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0;color:rgba(0,0,0,.45)">Total marks</td>
+                <td style="padding:6px 0;font-weight:600">${totalMarks}</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0;color:rgba(0,0,0,.45)">Opens at</td>
+                <td style="padding:6px 0">${exam.starts_at ? escapeHtml(fmtISO(exam.starts_at)) : '<span class="muted">Not set</span>'}</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0;color:rgba(0,0,0,.45)">Closes at</td>
+                <td style="padding:6px 0">${exam.ends_at ? escapeHtml(fmtISO(exam.ends_at)) : '<span class="muted">Not set</span>'}</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0;color:rgba(0,0,0,.45)">Pass mark</td>
+                <td style="padding:6px 0">${exam.pass_mark_percent != null ? escapeHtml(String(exam.pass_mark_percent)) + "%" : '<span class="muted">Not set</span>'}</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0;color:rgba(0,0,0,.45)">Results policy</td>
+                <td style="padding:6px 0">${escapeHtml(exam.results_release_policy || "MANUAL")}</td>
+              </tr>
+            </table>
+            ${questions.length === 0 ? `
+              <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:10px 14px;margin-top:14px;color:#856404;font-size:13px">
+                ⚠️ Add at least one question before publishing.
+              </div>
+            ` : ""}
+            ${exam.status === "DRAFT" ? `
+              <form method="post" action="/exam-publish" style="margin-top:14px">
+                <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
+                <button class="btn2" type="submit"${questions.length === 0 ? " disabled" : ""}>Publish Exam</button>
+              </form>
+            ` : `
+              <div style="background:#d4f5e9;border:1px solid #0b7a75;border-radius:8px;padding:10px 14px;margin-top:14px;color:#0b7a75;font-size:13px">
+                ✅ This exam has been published${exam.published_at ? " on " + escapeHtml(fmtISO(exam.published_at)) : ""}.
+              </div>
+            `}
+          </div>
+
+          <!-- Section 2: Close Exam (PUBLISHED or CLOSED only) -->
+          ${exam.status === "PUBLISHED" || exam.status === "CLOSED" ? `
+          <div class="card">
+            <div class="section-title">Close Exam</div>
+            ${exam.status === "CLOSED" ? `
+              <p style="font-size:14px;margin:0">This exam is closed.</p>
+            ` : exam.ends_at ? `
+              <p style="font-size:14px;margin:0">This exam will close automatically on <strong>${escapeHtml(fmtISO(exam.ends_at))}</strong>.</p>
+            ` : `
+              <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">No automatic close date is set. You can close it manually when ready.</p>
+              <form method="post" action="/exam-close">
+                <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
+                <button class="btn2" type="submit" style="background:#c00;border-color:#c00" onclick="return confirm('Close this exam now? Students will no longer be able to start it.')">Close Exam Now</button>
+              </form>
+            `}
+          </div>
+          ` : ""}
+
+          <!-- Section 3: Release Results (CLOSED only) -->
+          ${exam.status === "CLOSED" ? `
+          <div class="card">
+            <div class="section-title">Release Results</div>
+            ${exam.results_release_policy === "IMMEDIATE" || exam.results_release_policy === "AFTER_CLOSE" ? `
+              <p style="font-size:14px;margin:0">Results are released automatically per policy (<strong>${escapeHtml(exam.results_release_policy)}</strong>).</p>
+            ` : exam.results_published_at ? `
+              <p style="font-size:14px;margin:0">Results released on <strong>${escapeHtml(fmtISO(exam.results_published_at))}</strong>.</p>
+            ` : `
+              <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">Results have not been released to students yet.</p>
+              <form method="post" action="/exam-release-results">
+                <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
+                <button class="btn2" type="submit" onclick="return confirm('Release results to all students now?')">Release Results Now</button>
+              </form>
+            `}
+          </div>
+          ` : ""}
+
         </div>
+
+        <!-- ===== OTHER PANES ===== -->
         <div id="pane-access" class="pane">
           <div class="card"><h2>Access</h2><p class="muted">Coming soon.</p></div>
         </div>
@@ -1149,6 +1233,84 @@ export async function handleExamRequest(ctx) {
       }
 
       return redirect(`/exam-builder?exam_id=${examId}&pane=questions`);
+    }
+
+    // =============================
+    // Publish exam (POST)
+    // =============================
+    if (path === "/exam-publish" && request.method === "POST") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active || (active.role !== "TEACHER" && active.role !== "SCHOOL_ADMIN")) return redirect("/");
+
+      const f = await form();
+      const examId = (f.exam_id || "").trim();
+      const exam = await verifyExamAccess(examId, active.tenant_id, r.user.id, active.role);
+      if (!exam) return redirect("/teacher");
+
+      const qCount = await first(`SELECT COUNT(*) AS c FROM exam_questions WHERE exam_id=?`, [examId]);
+      if (!qCount || Number(qCount.c) === 0) return redirect(`/exam-builder?exam_id=${examId}&pane=publish`);
+
+      const ts = nowISO();
+      await run(
+        `UPDATE exams SET status='PUBLISHED', published_at=?, published_by=?, updated_at=? WHERE id=?`,
+        [ts, r.user.id, ts, examId]
+      );
+      return redirect(`/exam-builder?exam_id=${examId}&pane=publish`);
+    }
+
+    // =============================
+    // Close exam (POST)
+    // =============================
+    if (path === "/exam-close" && request.method === "POST") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active || (active.role !== "TEACHER" && active.role !== "SCHOOL_ADMIN")) return redirect("/");
+
+      const f = await form();
+      const examId = (f.exam_id || "").trim();
+      const exam = await verifyExamAccess(examId, active.tenant_id, r.user.id, active.role);
+      if (!exam) return redirect("/teacher");
+
+      const ts = nowISO();
+      const cols = await all(`PRAGMA table_info(exams)`, []);
+      const hasClosedAt = cols.some((c) => c.name === "closed_at");
+      if (hasClosedAt) {
+        await run(
+          `UPDATE exams SET status='CLOSED', closed_at=?, updated_at=? WHERE id=?`,
+          [ts, ts, examId]
+        );
+      } else {
+        await run(
+          `UPDATE exams SET status='CLOSED', updated_at=? WHERE id=?`,
+          [ts, examId]
+        );
+      }
+      return redirect(`/exam-builder?exam_id=${examId}&pane=publish`);
+    }
+
+    // =============================
+    // Release results (POST)
+    // =============================
+    if (path === "/exam-release-results" && request.method === "POST") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active || (active.role !== "TEACHER" && active.role !== "SCHOOL_ADMIN")) return redirect("/");
+
+      const f = await form();
+      const examId = (f.exam_id || "").trim();
+      const exam = await verifyExamAccess(examId, active.tenant_id, r.user.id, active.role);
+      if (!exam) return redirect("/teacher");
+
+      const ts = nowISO();
+      await run(
+        `UPDATE exams SET results_published_at=?, updated_at=? WHERE id=?`,
+        [ts, ts, examId]
+      );
+      return redirect(`/exam-builder?exam_id=${examId}&pane=publish`);
     }
 
   } catch (err) {

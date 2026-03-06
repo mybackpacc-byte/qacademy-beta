@@ -28,7 +28,10 @@ export async function onRequest(ctx) {
     path === "/exam-delete-question" ||
     path === "/exam-reorder-question" ||
     path === "/exam-bank-picker" ||
-    path === "/exam-add-from-bank"
+    path === "/exam-add-from-bank" ||
+    path === "/exam-publish" ||
+    path === "/exam-close" ||
+    path === "/exam-release-results"
   ) {
     return handleExamRequest(ctx);
   }
