@@ -967,6 +967,7 @@ export async function handleExamRequest(ctx) {
 
       const filterType = url.searchParams.get("type") || "";
       const filterVis = url.searchParams.get("vis") || "";
+      const pickerError = url.searchParams.get("error") || "";
 
       let whereClause = `WHERE qb.tenant_id=? AND (qb.created_by=? OR qb.visibility='SCHOOL')`;
       const params = [active.tenant_id, r.user.id];
@@ -1070,6 +1071,7 @@ export async function handleExamRequest(ctx) {
           </div>
         </div>
 
+        ${pickerError === "duplicate" ? `<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:10px 14px;margin-bottom:8px;color:#856404;font-size:13px">This question is already in the exam.</div>` : ""}
         <div class="muted small" style="margin:4px 0 8px;padding:0 4px">${bankQuestions.length} question${bankQuestions.length !== 1 ? "s" : ""} found</div>
 
         ${bankQuestions.length > 0 ? questionCards : `
@@ -1118,6 +1120,12 @@ export async function handleExamRequest(ctx) {
         `SELECT option_text, is_correct, feedback, sort_order FROM question_bank_options WHERE bank_question_id=? ORDER BY sort_order ASC`,
         [bankQId]
       );
+
+      const existing = await first(
+        `SELECT 1 AS x FROM exam_questions WHERE exam_id=? AND bank_question_id=? LIMIT 1`,
+        [examId, bankQId]
+      );
+      if (existing) return redirect(`/exam-bank-picker?exam_id=${examId}&error=duplicate`);
 
       const ts = nowISO();
       const maxOrder = await first(`SELECT MAX(sort_order) AS m FROM exam_questions WHERE exam_id=?`, [examId]);
