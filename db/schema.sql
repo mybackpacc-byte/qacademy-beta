@@ -187,3 +187,105 @@ CREATE TABLE IF NOT EXISTS join_requests (
 );
 
 
+-- =============================================================
+-- STEP 2: Recreate exams table with all settings columns
+-- Run this after Step 1
+-- =============================================================
+CREATE TABLE IF NOT EXISTS exams (
+  -- Core identity (referenced by all other exam tables)
+  id                      TEXT PRIMARY KEY,
+  tenant_id               TEXT NOT NULL,       -- which school
+  course_id               TEXT NOT NULL,       -- which course
+  created_by              TEXT NOT NULL,       -- which teacher created it
+  status                  TEXT NOT NULL        -- DRAFT | PUBLISHED | CLOSED | ARCHIVED
+                          DEFAULT 'DRAFT',
+
+  -- Basic info
+  title                   TEXT NOT NULL,
+  description             TEXT,                -- instructions shown before exam starts
+
+  -- Timing
+  duration_mins           INTEGER NOT NULL     -- personal timer per student (minutes)
+                          DEFAULT 60,
+  starts_at               TEXT,                -- when students can open the exam (optional)
+  ends_at                 TEXT,                -- hard deadline for starting (optional)
+  late_submission_policy  TEXT,                -- HARD_CUT | ALLOW_DURATION (only relevant if ends_at set)
+
+  -- Attempts
+  max_attempts            INTEGER NOT NULL     -- how many times student can attempt
+                          DEFAULT 1,
+
+  -- Security
+  exam_password           TEXT,                -- optional room password students must enter
+
+  -- Behaviour toggles
+  shuffle_questions       INTEGER NOT NULL DEFAULT 0,   -- 1 = randomise question order per student
+  shuffle_options         INTEGER NOT NULL DEFAULT 0,   -- 1 = randomise MCQ option order per student
+  show_marks_during       INTEGER NOT NULL DEFAULT 0,   -- 1 = student can see marks per question
+  allow_review            INTEGER NOT NULL DEFAULT 0,   -- 1 = student can review after submission
+  navigation_mode         TEXT NOT NULL                 -- FREE | LINEAR
+                          DEFAULT 'FREE',
+
+  -- Results & grading
+  results_release_policy  TEXT NOT NULL                 -- IMMEDIATE | AFTER_CLOSE | MANUAL
+                          DEFAULT 'MANUAL',
+  score_display           TEXT NOT NULL                 -- BOTH | RAW | PERCENT | PASS_FAIL | HIDDEN
+                          DEFAULT 'BOTH',
+  pass_mark_percent       REAL,                         -- e.g. 50.0 means 50% needed to pass (optional)
+
+  -- Publish tracking (used by Publish pane later)
+  published_at            TEXT,
+  published_by            TEXT,
+  results_published_at    TEXT,
+
+  -- Timestamps
+  created_at              TEXT NOT NULL,
+  updated_at              TEXT NOT NULL,
+
+  FOREIGN KEY (tenant_id) REFERENCES tenants(id),
+  FOREIGN KEY (course_id) REFERENCES courses(id),
+  FOREIGN KEY (created_by) REFERENCES users(id)
+);
+
+
+-- =============================================================
+-- STEP 3: Supporting tables for repeating data
+-- Run both of these after Step 2
+-- =============================================================
+
+-- Grade bands (e.g. Distinction = 75%+, Credit = 65%+)
+CREATE TABLE IF NOT EXISTS exam_grade_bands (
+  id            TEXT PRIMARY KEY,
+  exam_id       TEXT NOT NULL,
+  label         TEXT NOT NULL,        -- e.g. "Distinction", "A", "Pass"
+  min_percent   REAL NOT NULL,        -- minimum % to achieve this grade
+  created_at    TEXT NOT NULL,
+
+  FOREIGN KEY (exam_id) REFERENCES exams(id)
+);
+
+-- Custom fields (collected from student before exam starts)
+CREATE TABLE IF NOT EXISTS exam_custom_fields (
+  id              TEXT PRIMARY KEY,
+  exam_id         TEXT NOT NULL,
+  field_label     TEXT NOT NULL,      -- e.g. "Index Number", "Seat Number"
+  field_type      TEXT NOT NULL,      -- TEXT | YESNO | DROPDOWN
+  field_options   TEXT,               -- comma-separated options (only for DROPDOWN type)
+  is_required     INTEGER NOT NULL    -- 1 = student must fill this in
+                  DEFAULT 1,
+  sort_order      INTEGER NOT NULL    -- display order
+                  DEFAULT 0,
+  created_at      TEXT NOT NULL,
+
+  FOREIGN KEY (exam_id) REFERENCES exams(id)
+);
+
+
+-- =============================================================
+-- INDEXES
+-- =============================================================
+CREATE INDEX IF NOT EXISTS idx_exams_course_id        ON exams(course_id);
+CREATE INDEX IF NOT EXISTS idx_exams_tenant_id        ON exams(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_exams_status           ON exams(status);
+CREATE INDEX IF NOT EXISTS idx_exam_grade_bands_exam  ON exam_grade_bands(exam_id);
+CREATE INDEX IF NOT EXISTS idx_exam_custom_fields_exam ON exam_custom_fields(exam_id);
