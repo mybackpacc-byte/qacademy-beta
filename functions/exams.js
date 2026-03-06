@@ -365,6 +365,64 @@ export async function handleExamRequest(ctx) {
 
       const activePane = url.searchParams.get("pane") || (editQId ? "questions" : "settings");
 
+      // === Access pane data ===
+      const accessList = await all(
+        `SELECT ea.id, ea.user_id, u.name AS student_name, u.email AS student_email,
+                GROUP_CONCAT(c.name, ', ') AS class_names
+         FROM exam_access ea
+         JOIN users u ON u.id = ea.user_id
+         LEFT JOIN class_students cs ON cs.user_id = ea.user_id
+         LEFT JOIN classes c ON c.id = cs.class_id AND c.tenant_id=?
+         WHERE ea.exam_id=?
+         GROUP BY ea.id
+         ORDER BY u.name ASC`,
+        [active.tenant_id, examId]
+      );
+      const tenantClasses = await all(
+        `SELECT id, name, year_group FROM classes WHERE tenant_id=? AND status='ACTIVE' ORDER BY name ASC`,
+        [active.tenant_id]
+      );
+      const enrolledStudents = await all(
+        `SELECT u.id, u.name, u.email
+         FROM users u
+         JOIN enrollments e ON e.user_id=u.id AND e.course_id=?
+         WHERE u.id NOT IN (SELECT user_id FROM exam_access WHERE exam_id=?)
+         ORDER BY u.name ASC`,
+        [exam.course_id, examId]
+      );
+      const allStudents = await all(
+        `SELECT u.id, u.name, u.email
+         FROM users u
+         JOIN memberships m ON m.user_id=u.id AND m.tenant_id=? AND m.role='STUDENT' AND m.status='ACTIVE'
+         WHERE u.id NOT IN (SELECT user_id FROM exam_access WHERE exam_id=?)
+         ORDER BY u.name ASC`,
+        [active.tenant_id, examId]
+      );
+
+      // Pre-built HTML fragments for access pane (avoids deep template nesting)
+      const accessRows = accessList.map((s) => `
+        <tr style="border-bottom:1px solid rgba(0,0,0,.05)">
+          <td style="padding:7px 8px">${escapeHtml(s.student_name)}</td>
+          <td style="padding:7px 8px;color:rgba(0,0,0,.55)">${escapeHtml(s.student_email)}</td>
+          <td style="padding:7px 8px;color:rgba(0,0,0,.55)">${s.class_names ? escapeHtml(s.class_names) : '<span class="muted">—</span>'}</td>
+          ${exam.status !== "CLOSED" ? `<td style="padding:7px 8px">
+            <form method="post" action="/exam-access-remove" style="margin:0">
+              <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
+              <input type="hidden" name="access_id" value="${escapeAttr(s.id)}" />
+              <button type="submit" class="btn3">Remove</button>
+            </form>
+          </td>` : ""}
+        </tr>
+      `).join("");
+
+      const classOpts = tenantClasses.map((c) =>
+        `<option value="${escapeAttr(c.id)}">${escapeHtml(c.name)}${c.year_group ? ` (${escapeHtml(c.year_group)})` : ""}</option>`
+      ).join("");
+
+      const studentOpts = allStudents.map((s) =>
+        `<option value="${escapeAttr(s.id)}">${escapeHtml(s.name)} (${escapeHtml(s.email)})</option>`
+      ).join("");
+
       return page(`
         <style>
           .tabs{display:flex;gap:4px;margin-bottom:0;border-bottom:2px solid rgba(0,0,0,.08);padding-bottom:0}
@@ -402,7 +460,7 @@ export async function handleExamRequest(ctx) {
             <button class="tab ${activePane === "settings" ? "active" : ""}" onclick="showPane('settings',this)">Settings</button>
             <button class="tab ${activePane === "questions" ? "active" : ""}" onclick="showPane('questions',this)">Questions</button>
             <button class="tab ${activePane === "publish" ? "active" : ""}" onclick="showPane('publish',this)">Publish</button>
-            <button class="tab" onclick="showPane('access',this)">Access</button>
+            <button class="tab ${activePane === "access" ? "active" : ""}" onclick="showPane('access',this)">Access</button>
             <button class="tab" onclick="showPane('results',this)">Results</button>
           </div>
         </div>
@@ -709,11 +767,93 @@ export async function handleExamRequest(ctx) {
 
         </div>
 
-        <!-- ===== OTHER PANES ===== -->
-        <div id="pane-access" class="pane">
-          <div class="card"><h2>Access</h2><p class="muted">Coming soon.</p></div>
+        <!-- ===== ACCESS PANE ===== -->
+        <div id="pane-access" class="pane ${activePane === "access" ? "active" : ""}">
+
+          <!-- Access list summary + table -->
+          <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+              <h2 style="margin:0">Access List</h2>
+              <span class="pill ${accessList.length === 0 ? "badge-draft" : "badge-published"}">${accessList.length} student${accessList.length === 1 ? "" : "s"}</span>
+            </div>
+            ${exam.status === "PUBLISHED" && accessList.length === 0 ? `
+            <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:10px 14px;margin-bottom:12px;color:#856404;font-size:13px">
+              ⚠️ This exam is published but no students are on the access list — no one can take it yet.
+            </div>
+            ` : ""}
+            ${exam.status === "CLOSED" ? `
+            <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:10px 14px;margin-bottom:12px;color:#856404;font-size:13px">
+              🔒 This exam is closed — the access list is read-only.
+            </div>
+            ` : ""}
+            ${accessList.length === 0 ? `
+              <p class="muted">No students on the access list yet.</p>
+            ` : `
+              <table style="width:100%;border-collapse:collapse;font-size:13px">
+                <thead>
+                  <tr style="border-bottom:2px solid rgba(0,0,0,.08)">
+                    <th style="text-align:left;padding:6px 8px;color:rgba(0,0,0,.5)">Name</th>
+                    <th style="text-align:left;padding:6px 8px;color:rgba(0,0,0,.5)">Email</th>
+                    <th style="text-align:left;padding:6px 8px;color:rgba(0,0,0,.5)">Class</th>
+                    ${exam.status !== "CLOSED" ? `<th style="width:80px"></th>` : ""}
+                  </tr>
+                </thead>
+                <tbody>${accessRows}</tbody>
+              </table>
+            `}
+          </div>
+
+          <!-- Add student cards — only shown when exam is not CLOSED -->
+          ${exam.status !== "CLOSED" ? `
+          ${tenantClasses.length > 0 ? `
+          <div class="card" style="margin-top:12px">
+            <h3 style="margin:0 0 10px">Add by Class</h3>
+            <p class="muted" style="font-size:13px;margin:0 0 12px">All students in the selected class will be added to the access list (duplicates skipped).</p>
+            <form method="post" action="/exam-access-add-class" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+              <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
+              <div style="flex:1;min-width:180px">
+                <label style="font-size:12px;font-weight:600;color:rgba(0,0,0,.5);display:block;margin-bottom:4px">Class</label>
+                <select name="class_id" required style="width:100%">
+                  <option value="">— select class —</option>
+                  ${classOpts}
+                </select>
+              </div>
+              <button class="btn2" type="submit">Add Class</button>
+            </form>
+          </div>
+          ` : ""}
+          <div class="card" style="margin-top:12px">
+            <h3 style="margin:0 0 8px">Add from Course Enrollment</h3>
+            <p class="muted" style="font-size:13px;margin:0 0 12px">Adds all students currently enrolled in this exam's course who aren't already on the list. ${enrolledStudents.length > 0 ? `<strong style="color:#0b7a75">${enrolledStudents.length} student${enrolledStudents.length === 1 ? "" : "s"} eligible.</strong>` : `<strong>All enrolled students are already on the list.</strong>`}</p>
+            ${enrolledStudents.length > 0 ? `
+            <form method="post" action="/exam-access-add-course" style="margin:0">
+              <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
+              <button class="btn2" type="submit">Add All Enrolled (${enrolledStudents.length})</button>
+            </form>
+            ` : ""}
+          </div>
+          ${allStudents.length > 0 ? `
+          <div class="card" style="margin-top:12px">
+            <h3 style="margin:0 0 10px">Add Individual Student</h3>
+            <form method="post" action="/exam-access-add-student" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+              <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
+              <div style="flex:1;min-width:220px">
+                <label style="font-size:12px;font-weight:600;color:rgba(0,0,0,.5);display:block;margin-bottom:4px">Student</label>
+                <select name="user_id" required style="width:100%">
+                  <option value="">— select student —</option>
+                  ${studentOpts}
+                </select>
+              </div>
+              <button class="btn2" type="submit">Add Student</button>
+            </form>
+          </div>
+          ` : ""}
+          ` : ""}
+
         </div>
-        <div id="pane-results" class="pane">
+
+        <!-- ===== RESULTS PANE ===== -->
+        <div id="pane-results" class="pane ${activePane === "results" ? "active" : ""}">
           <div class="card"><h2>Results</h2><p class="muted">Coming soon.</p></div>
         </div>
 
@@ -1345,6 +1485,137 @@ export async function handleExamRequest(ctx) {
         [ts, ts, examId]
       );
       return redirect(`/exam-builder?exam_id=${examId}&pane=publish`);
+    }
+
+    // =============================
+    // Access: add students from a class (POST)
+    // =============================
+    if (path === "/exam-access-add-class" && request.method === "POST") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active || (active.role !== "TEACHER" && active.role !== "SCHOOL_ADMIN")) return redirect("/");
+
+      const f = await form();
+      const examId = (f.exam_id || "").trim();
+      const classId = (f.class_id || "").trim();
+      const exam = await verifyExamAccess(examId, active.tenant_id, r.user.id, active.role);
+      if (!exam) return redirect("/teacher");
+      if (exam.status === "CLOSED") return redirect(`/exam-builder?exam_id=${examId}&pane=access`);
+
+      const cls = await first(`SELECT id FROM classes WHERE id=? AND tenant_id=?`, [classId, active.tenant_id]);
+      if (!cls) return redirect(`/exam-builder?exam_id=${examId}&pane=access`);
+
+      const toAdd = await all(
+        `SELECT cs.user_id FROM class_students cs
+         WHERE cs.class_id=?
+         AND cs.user_id NOT IN (SELECT user_id FROM exam_access WHERE exam_id=?)`,
+        [classId, examId]
+      );
+
+      const ts = nowISO();
+      for (const row of toAdd) {
+        await run(
+          `INSERT INTO exam_access (id, exam_id, user_id, added_by, created_at) VALUES (?, ?, ?, ?, ?)`,
+          [uuid(), examId, row.user_id, r.user.id, ts]
+        );
+      }
+
+      return redirect(`/exam-builder?exam_id=${examId}&pane=access`);
+    }
+
+    // =============================
+    // Access: add students from course enrollment (POST)
+    // =============================
+    if (path === "/exam-access-add-course" && request.method === "POST") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active || (active.role !== "TEACHER" && active.role !== "SCHOOL_ADMIN")) return redirect("/");
+
+      const f = await form();
+      const examId = (f.exam_id || "").trim();
+      const exam = await verifyExamAccess(examId, active.tenant_id, r.user.id, active.role);
+      if (!exam) return redirect("/teacher");
+      if (exam.status === "CLOSED") return redirect(`/exam-builder?exam_id=${examId}&pane=access`);
+
+      const toAdd = await all(
+        `SELECT e.user_id FROM enrollments e
+         WHERE e.course_id=?
+         AND e.user_id NOT IN (SELECT user_id FROM exam_access WHERE exam_id=?)`,
+        [exam.course_id, examId]
+      );
+
+      const ts = nowISO();
+      for (const row of toAdd) {
+        await run(
+          `INSERT INTO exam_access (id, exam_id, user_id, added_by, created_at) VALUES (?, ?, ?, ?, ?)`,
+          [uuid(), examId, row.user_id, r.user.id, ts]
+        );
+      }
+
+      return redirect(`/exam-builder?exam_id=${examId}&pane=access`);
+    }
+
+    // =============================
+    // Access: add individual student (POST)
+    // =============================
+    if (path === "/exam-access-add-student" && request.method === "POST") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active || (active.role !== "TEACHER" && active.role !== "SCHOOL_ADMIN")) return redirect("/");
+
+      const f = await form();
+      const examId = (f.exam_id || "").trim();
+      const userId = (f.user_id || "").trim();
+      const exam = await verifyExamAccess(examId, active.tenant_id, r.user.id, active.role);
+      if (!exam) return redirect("/teacher");
+      if (exam.status === "CLOSED") return redirect(`/exam-builder?exam_id=${examId}&pane=access`);
+
+      const member = await first(
+        `SELECT 1 AS x FROM memberships WHERE user_id=? AND tenant_id=? AND role='STUDENT' AND status='ACTIVE' LIMIT 1`,
+        [userId, active.tenant_id]
+      );
+      if (!member) return redirect(`/exam-builder?exam_id=${examId}&pane=access`);
+
+      const already = await first(
+        `SELECT 1 AS x FROM exam_access WHERE exam_id=? AND user_id=? LIMIT 1`,
+        [examId, userId]
+      );
+      if (!already) {
+        const ts = nowISO();
+        await run(
+          `INSERT INTO exam_access (id, exam_id, user_id, added_by, created_at) VALUES (?, ?, ?, ?, ?)`,
+          [uuid(), examId, userId, r.user.id, ts]
+        );
+      }
+
+      return redirect(`/exam-builder?exam_id=${examId}&pane=access`);
+    }
+
+    // =============================
+    // Access: remove student (POST)
+    // =============================
+    if (path === "/exam-access-remove" && request.method === "POST") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active || (active.role !== "TEACHER" && active.role !== "SCHOOL_ADMIN")) return redirect("/");
+
+      const f = await form();
+      const examId = (f.exam_id || "").trim();
+      const accessId = (f.access_id || "").trim();
+      const exam = await verifyExamAccess(examId, active.tenant_id, r.user.id, active.role);
+      if (!exam) return redirect("/teacher");
+      if (exam.status === "CLOSED") return redirect(`/exam-builder?exam_id=${examId}&pane=access`);
+
+      await run(
+        `DELETE FROM exam_access WHERE id=? AND exam_id=?`,
+        [accessId, examId]
+      );
+
+      return redirect(`/exam-builder?exam_id=${examId}&pane=access`);
     }
 
   } catch (err) {

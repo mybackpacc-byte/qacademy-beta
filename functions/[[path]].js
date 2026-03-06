@@ -31,7 +31,11 @@ export async function onRequest(ctx) {
     path === "/exam-add-from-bank" ||
     path === "/exam-publish" ||
     path === "/exam-close" ||
-    path === "/exam-release-results"
+    path === "/exam-release-results" ||
+    path === "/exam-access-add-class" ||
+    path === "/exam-access-add-course" ||
+    path === "/exam-access-add-student" ||
+    path === "/exam-access-remove"
   ) {
     return handleExamRequest(ctx);
   }
