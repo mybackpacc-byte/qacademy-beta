@@ -1,6 +1,23 @@
 // functions/[[path]].js
-import { handleRequest } from "./app.js";
+// Entry point — routes requests to the correct handler file
+// Do not put any logic here
+
+import { handleAppRequest } from "./app.js";
+import { handleExamRequest } from "./exams.js";
 
 export async function onRequest(ctx) {
-  return handleRequest(ctx);
+  const url = new URL(ctx.request.url);
+  const path = url.pathname;
+
+  // All exam builder routes go to exams.js
+  if (
+    path === "/exam-create" ||
+    path === "/exam-builder" ||
+    path === "/exam-save-settings"
+  ) {
+    return handleExamRequest(ctx);
+  }
+
+  // Everything else goes to app.js
+  return handleAppRequest(ctx);
 }
