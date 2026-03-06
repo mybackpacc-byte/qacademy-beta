@@ -669,9 +669,17 @@ export async function handleExamRequest(ctx) {
             <div class="section-title">Close Exam</div>
             ${exam.status === "CLOSED" ? `
               <p style="font-size:14px;margin:0">This exam is closed.</p>
-            ` : exam.ends_at ? `
+            ` : exam.ends_at ? (new Date(exam.ends_at) > new Date() ? `
               <p style="font-size:14px;margin:0">This exam will close automatically on <strong>${escapeHtml(fmtISO(exam.ends_at))}</strong>.</p>
             ` : `
+              <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:10px 14px;margin-bottom:12px;color:#856404;font-size:13px">
+                ⚠️ Your scheduled close date has passed.
+              </div>
+              <form method="post" action="/exam-close">
+                <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
+                <button class="btn2" type="submit" style="background:#c00;border-color:#c00" onclick="return confirm('Close this exam now? Students will no longer be able to start it.')">Close Exam Now</button>
+              </form>
+            `) : `
               <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">No automatic close date is set. You can close it manually when ready.</p>
               <form method="post" action="/exam-close">
                 <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
@@ -1277,9 +1285,10 @@ export async function handleExamRequest(ctx) {
       if (!qCount || Number(qCount.c) === 0) return redirect(`/exam-builder?exam_id=${examId}&pane=publish`);
 
       const ts = nowISO();
+      const releaseOnPublish = exam.results_release_policy === "IMMEDIATE";
       await run(
-        `UPDATE exams SET status='PUBLISHED', published_at=?, published_by=?, updated_at=? WHERE id=?`,
-        [ts, r.user.id, ts, examId]
+        `UPDATE exams SET status='PUBLISHED', published_at=?, published_by=?, updated_at=?${releaseOnPublish ? ", results_published_at=?" : ""} WHERE id=?`,
+        releaseOnPublish ? [ts, r.user.id, ts, ts, examId] : [ts, r.user.id, ts, examId]
       );
       return redirect(`/exam-builder?exam_id=${examId}&pane=publish`);
     }
@@ -1299,17 +1308,18 @@ export async function handleExamRequest(ctx) {
       if (!exam) return redirect("/teacher");
 
       const ts = nowISO();
+      const releaseOnClose = exam.results_release_policy === "AFTER_CLOSE";
       const cols = await all(`PRAGMA table_info(exams)`, []);
       const hasClosedAt = cols.some((c) => c.name === "closed_at");
       if (hasClosedAt) {
         await run(
-          `UPDATE exams SET status='CLOSED', closed_at=?, updated_at=? WHERE id=?`,
-          [ts, ts, examId]
+          `UPDATE exams SET status='CLOSED', closed_at=?, updated_at=?${releaseOnClose ? ", results_published_at=?" : ""} WHERE id=?`,
+          releaseOnClose ? [ts, ts, ts, examId] : [ts, ts, examId]
         );
       } else {
         await run(
-          `UPDATE exams SET status='CLOSED', updated_at=? WHERE id=?`,
-          [ts, examId]
+          `UPDATE exams SET status='CLOSED', updated_at=?${releaseOnClose ? ", results_published_at=?" : ""} WHERE id=?`,
+          releaseOnClose ? [ts, ts, examId] : [ts, examId]
         );
       }
       return redirect(`/exam-builder?exam_id=${examId}&pane=publish`);
