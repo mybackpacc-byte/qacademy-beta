@@ -303,5 +303,29 @@ Duplicate add-from-bank bug fixed — check for existing bank_question_id before
 ends_at past date edge case fixed in Publish pane
 IMMEDIATE policy sets results_published_at on publish; AFTER_CLOSE sets it on close
 
+1. Update Exam Builder section:
+
+Access pane → ✅ COMPLETE
+
+2. Add to Database Tables:
+
+19. exam_access — explicit per-exam access list (id, exam_id, user_id, added_by, created_at)
+
+3. Add to Important Decisions:
+
+Exams belong to a course for organisational purposes only — course is not an access gate
+Access is determined purely by the exam_access table
+Teachers build the access list per exam — by class, by course enrollment (shortcut), or individually
+A student does NOT need to be enrolled in the course to take an exam — teacher controls access explicitly
+"Add from course enrollment" in Access pane is a shortcut, not a requirement
+
+4. Update What Comes Next:
+
+Access pane → ✅ COMPLETE
+Exam taking engine → next
+
+5. Update last line:
+*Last updated: Access pane complete. Design clarified — access is explicit via exam_access table, not tied to course enrollment. Next: Exam taking engine.*
+
 7. Update last line:
 *Last updated: Publish pane complete. Classes built. Next: Access pane, then exam taking engine.*
