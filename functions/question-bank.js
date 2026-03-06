@@ -37,11 +37,11 @@ export async function handleQuestionBankRequest(ctx) {
       if (qType === "TRUE_FALSE") {
         const correct = (f.tf_correct || "").trim();
         await run(
-          `INSERT INTO question_bank_options (id,question_id,option_text,is_correct,feedback,sort_order,created_at) VALUES (?,?,?,?,?,?,?)`,
+          `INSERT INTO question_bank_options (id,bank_question_id,option_text,is_correct,feedback,sort_order,created_at) VALUES (?,?,?,?,?,?,?)`,
           [uuid(), bankQId, "True", correct === "True" ? 1 : 0, null, 1, ts]
         );
         await run(
-          `INSERT INTO question_bank_options (id,question_id,option_text,is_correct,feedback,sort_order,created_at) VALUES (?,?,?,?,?,?,?)`,
+          `INSERT INTO question_bank_options (id,bank_question_id,option_text,is_correct,feedback,sort_order,created_at) VALUES (?,?,?,?,?,?,?)`,
           [uuid(), bankQId, "False", correct === "False" ? 1 : 0, null, 2, ts]
         );
         return;
@@ -57,7 +57,7 @@ export async function handleQuestionBankRequest(ctx) {
           const isCorrect = correctIndices.has(String(i)) ? 1 : 0;
           const optFeedback = (feedbacks[i] || "").trim() || null;
           await run(
-            `INSERT INTO question_bank_options (id,question_id,option_text,is_correct,feedback,sort_order,created_at) VALUES (?,?,?,?,?,?,?)`,
+            `INSERT INTO question_bank_options (id,bank_question_id,option_text,is_correct,feedback,sort_order,created_at) VALUES (?,?,?,?,?,?,?)`,
             [uuid(), bankQId, text, isCorrect, optFeedback, i + 1, ts]
           );
         }
@@ -99,9 +99,9 @@ export async function handleQuestionBankRequest(ctx) {
 
       // Load all options for displayed questions
       const allOptions = questions.length > 0 ? await all(
-        `SELECT question_id, option_text, is_correct, feedback, sort_order
+        `SELECT bank_question_id AS question_id, option_text, is_correct, feedback, sort_order
          FROM question_bank_options
-         WHERE question_id IN (${questions.map(() => "?").join(",")})
+         WHERE bank_question_id IN (${questions.map(() => "?").join(",")})
          ORDER BY sort_order ASC`,
         questions.map((q) => q.id)
       ) : [];
@@ -454,7 +454,7 @@ export async function handleQuestionBankRequest(ctx) {
         `UPDATE question_bank SET question_type=?, question_text=?, marks=?, partial_marking=?, model_answer=?, feedback=?, visibility=?, updated_at=? WHERE id=?`,
         [qType, qText, marks, partialMarking, modelAnswer, feedback, visibility, ts, qId]
       );
-      await run(`DELETE FROM question_bank_options WHERE question_id=?`, [qId]);
+      await run(`DELETE FROM question_bank_options WHERE bank_question_id=?`, [qId]);
       await saveBankOptions(qId, qType, f, ts);
       return redirect("/question-bank");
     }
@@ -479,7 +479,7 @@ export async function handleQuestionBankRequest(ctx) {
       );
       if (!existing) return redirect("/question-bank");
 
-      await run(`DELETE FROM question_bank_options WHERE question_id=?`, [qId]);
+      await run(`DELETE FROM question_bank_options WHERE bank_question_id=?`, [qId]);
       await run(`DELETE FROM question_bank WHERE id=?`, [qId]);
 
       // Unlink from any exam questions (don't delete exam questions — just unlink)
