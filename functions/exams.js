@@ -218,6 +218,7 @@ export async function handleExamRequest(ctx) {
       }
 
       const totalMarks = questions.reduce((sum, q) => sum + Number(q.marks || 0), 0);
+      const locked = exam.status === "PUBLISHED" || exam.status === "CLOSED";
 
       // Build question list rows
       const questionRows = questions.map((q, i) => {
@@ -242,6 +243,7 @@ export async function handleExamRequest(ctx) {
                 <div style="font-size:14px;margin-bottom:6px">${escapeHtml(q.question_text)}</div>
                 <div>${preview}</div>
               </div>
+              ${locked ? "" : `
               <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">
                 <div style="display:flex;gap:4px">
                   <form method="post" action="/exam-reorder-question" style="display:inline">
@@ -264,6 +266,7 @@ export async function handleExamRequest(ctx) {
                   <button class="btn3" type="submit" style="font-size:12px;padding:4px 10px;border-radius:8px;color:#c00">Delete</button>
                 </form>
               </div>
+              `}
             </div>
           </div>
         `;
@@ -409,6 +412,13 @@ export async function handleExamRequest(ctx) {
           <form method="post" action="/exam-save-settings">
             <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
 
+            ${locked ? `
+            <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:10px 14px;margin-bottom:8px;color:#856404;font-size:13px">
+              🔒 This exam is published — settings are locked.
+            </div>
+            <fieldset disabled style="border:none;padding:0;margin:0">
+            ` : ""}
+
             <div class="card">
               <div class="section-title">Basic Info</div>
               <label>Exam title</label>
@@ -513,14 +523,24 @@ export async function handleExamRequest(ctx) {
               <button type="button" class="btn3" onclick="addCustomField()" style="margin-top:4px">+ Add custom field</button>
             </div>
 
+            ${locked ? "</fieldset>" : ""}
+
+            ${locked ? "" : `
             <div class="save-bar">
               <button type="submit" class="btn2">Save settings</button>
             </div>
+            `}
           </form>
         </div>
 
         <!-- ===== QUESTIONS PANE ===== -->
         <div id="pane-questions" class="pane ${activePane === "questions" ? "active" : ""}">
+
+          ${locked ? `
+          <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:10px 14px;margin-bottom:8px;color:#856404;font-size:13px">
+            🔒 This exam is published — questions are locked and cannot be edited.
+          </div>
+          ` : ""}
 
           <div class="card">
             <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
@@ -528,10 +548,12 @@ export async function handleExamRequest(ctx) {
                 <h2 style="margin:0">Questions</h2>
                 <div class="muted small">${questions.length} question${questions.length !== 1 ? "s" : ""} &nbsp;·&nbsp; ${totalMarks} mark${totalMarks !== 1 ? "s" : ""} total</div>
               </div>
+              ${locked ? "" : `
               <div class="actions">
                 <a href="/exam-bank-picker?exam_id=${escapeAttr(examId)}" class="btn3" style="display:inline-block;padding:8px 14px;border-radius:10px;text-decoration:none;font-weight:700">📚 Add from bank</a>
                 <a href="/exam-builder?exam_id=${escapeAttr(examId)}&pane=questions" class="btn2" style="display:inline-block;padding:8px 14px;border-radius:10px;color:#fff;text-decoration:none;font-weight:700">+ New question</a>
               </div>
+              `}
             </div>
           </div>
 
@@ -541,6 +563,7 @@ export async function handleExamRequest(ctx) {
             </div>
           `}
 
+          ${locked ? "" : `
           <!-- Add / Edit question form -->
           <div class="card" id="question-form-card">
             <h2 style="margin:0 0 14px">${editQ ? "Edit question" : "Add question"}</h2>
@@ -588,6 +611,7 @@ export async function handleExamRequest(ctx) {
               </div>
             </form>
           </div>
+          `}
         </div>
 
         <!-- ===== PUBLISH PANE ===== -->
