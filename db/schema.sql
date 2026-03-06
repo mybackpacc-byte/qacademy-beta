@@ -332,7 +332,24 @@ CREATE TABLE IF NOT EXISTS exam_question_options (
 CREATE INDEX IF NOT EXISTS idx_exam_questions_exam_id     ON exam_questions(exam_id);
 CREATE INDEX IF NOT EXISTS idx_exam_question_opts_qid     ON exam_question_options(question_id);
 
+CREATE TABLE classes (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  year_group TEXT,
+  academic_year TEXT,
+  description TEXT,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 
+CREATE TABLE class_students (
+  id TEXT PRIMARY KEY,
+  class_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 CREATE TABLE exam_access (
   id TEXT PRIMARY KEY,
   exam_id TEXT NOT NULL,
