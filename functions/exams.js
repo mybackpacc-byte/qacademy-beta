@@ -82,7 +82,7 @@ export async function handleExamRequest(ctx) {
           [qType, qText, marks, partialMarking, modelAnswer, feedback, ts, bankId]
         );
         // Rebuild options
-        await run(`DELETE FROM question_bank_options WHERE question_id=?`, [bankId]);
+        await run(`DELETE FROM question_bank_options WHERE bank_question_id=?`, [bankId]);
         await saveBankOptions(bankId, qType, f, ts);
         return bankId;
       } else {
@@ -102,11 +102,11 @@ export async function handleExamRequest(ctx) {
       if (qType === "TRUE_FALSE") {
         const correct = (f.tf_correct || "").trim();
         await run(
-          `INSERT INTO question_bank_options (id,question_id,option_text,is_correct,feedback,sort_order,created_at) VALUES (?,?,?,?,?,?,?)`,
+          `INSERT INTO question_bank_options (id,bank_question_id,option_text,is_correct,feedback,sort_order,created_at) VALUES (?,?,?,?,?,?,?)`,
           [uuid(), bankQId, "True", correct === "True" ? 1 : 0, null, 1, ts]
         );
         await run(
-          `INSERT INTO question_bank_options (id,question_id,option_text,is_correct,feedback,sort_order,created_at) VALUES (?,?,?,?,?,?,?)`,
+          `INSERT INTO question_bank_options (id,bank_question_id,option_text,is_correct,feedback,sort_order,created_at) VALUES (?,?,?,?,?,?,?)`,
           [uuid(), bankQId, "False", correct === "False" ? 1 : 0, null, 2, ts]
         );
         return;
@@ -122,7 +122,7 @@ export async function handleExamRequest(ctx) {
           const isCorrect = correctIndices.has(String(i)) ? 1 : 0;
           const optFeedback = (feedbacks[i] || "").trim() || null;
           await run(
-            `INSERT INTO question_bank_options (id,question_id,option_text,is_correct,feedback,sort_order,created_at) VALUES (?,?,?,?,?,?,?)`,
+            `INSERT INTO question_bank_options (id,bank_question_id,option_text,is_correct,feedback,sort_order,created_at) VALUES (?,?,?,?,?,?,?)`,
             [uuid(), bankQId, text, isCorrect, optFeedback, i + 1, ts]
           );
         }
@@ -987,8 +987,8 @@ export async function handleExamRequest(ctx) {
 
       // Get options for all bank questions
       const bankOptions = bankQuestions.length > 0 ? await all(
-        `SELECT question_id, option_text, is_correct FROM question_bank_options
-         WHERE question_id IN (${bankQuestions.map(() => "?").join(",")})
+        `SELECT bank_question_id AS question_id, option_text, is_correct FROM question_bank_options
+         WHERE bank_question_id IN (${bankQuestions.map(() => "?").join(",")})
          ORDER BY sort_order ASC`,
         bankQuestions.map((q) => q.id)
       ) : [];
@@ -1115,7 +1115,7 @@ export async function handleExamRequest(ctx) {
       if (!bq) return redirect(`/exam-bank-picker?exam_id=${examId}`);
 
       const bankOpts = await all(
-        `SELECT option_text, is_correct, feedback, sort_order FROM question_bank_options WHERE question_id=? ORDER BY sort_order ASC`,
+        `SELECT option_text, is_correct, feedback, sort_order FROM question_bank_options WHERE bank_question_id=? ORDER BY sort_order ASC`,
         [bankQId]
       );
 
