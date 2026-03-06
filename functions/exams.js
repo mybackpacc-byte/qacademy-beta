@@ -472,7 +472,10 @@ export async function handleExamRequest(ctx) {
                 <h2 style="margin:0">Questions</h2>
                 <div class="muted small">${questions.length} question${questions.length !== 1 ? "s" : ""} &nbsp;·&nbsp; ${totalMarks} mark${totalMarks !== 1 ? "s" : ""} total</div>
               </div>
-              <a href="/exam-builder?exam_id=${escapeAttr(examId)}#questions" class="btn2" style="display:inline-block;padding:8px 14px;border-radius:10px;color:#fff;text-decoration:none;font-weight:700">+ Add question</a>
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <a href="/exam-builder?exam_id=${escapeAttr(examId)}#questions" class="btn2" style="display:inline-block;padding:8px 14px;border-radius:10px;color:#fff;text-decoration:none;font-weight:700">+ Add question</a>
+                <a href="/exam-bank-picker?exam_id=${escapeAttr(examId)}" class="btn3" style="display:inline-block;padding:8px 14px;border-radius:10px;text-decoration:none;font-weight:700">📚 Add from bank</a>
+              </div>
             </div>
           </div>
 
@@ -835,15 +838,24 @@ export async function handleExamRequest(ctx) {
       const maxOrder = await first(`SELECT MAX(sort_order) AS m FROM exam_questions WHERE exam_id=?`, [examId]);
       const sortOrder = (Number(maxOrder?.m) || 0) + 1;
 
+      // Auto-save to question bank first
+      const bankId = uuid();
+      await run(
+        `INSERT INTO question_bank
+         (id, tenant_id, created_by, question_type, question_text, marks, partial_marking, model_answer, feedback, visibility, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [bankId, active.tenant_id, r.user.id, qType, qText, marks, partialMarking, modelAnswer, feedback, "PERSONAL", ts, ts]
+      );
+      await saveBankOptions(bankId, qType, f, ts);
+
+      // Now insert into exam_questions, linked to bank
       const qId = uuid();
       await run(
         `INSERT INTO exam_questions
-         (id, exam_id, tenant_id, question_type, question_text, marks, sort_order, partial_marking, model_answer, feedback, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [qId, examId, active.tenant_id, qType, qText, marks, sortOrder, partialMarking, modelAnswer, feedback, ts, ts]
+         (id, exam_id, tenant_id, question_type, question_text, marks, sort_order, partial_marking, model_answer, feedback, bank_question_id, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [qId, examId, active.tenant_id, qType, qText, marks, sortOrder, partialMarking, modelAnswer, feedback, bankId, ts, ts]
       );
-
-      // Save options for MCQ, MULTIPLE_SELECT, TRUE_FALSE
       await saveQuestionOptions(qId, qType, f, ts);
 
       return redirect(`/exam-builder?exam_id=${examId}&pane=questions#question-form-card`);
@@ -882,9 +894,44 @@ export async function handleExamRequest(ctx) {
         [qType, qText, marks, partialMarking, modelAnswer, feedback, ts, qId, examId]
       );
 
-      // Rebuild options
+      // Rebuild exam options
       await run(`DELETE FROM exam_question_options WHERE question_id=?`, [qId]);
       await saveQuestionOptions(qId, qType, f, ts);
+
+      // If exam is DRAFT and question is linked to bank — sync bank copy too
+      if (exam.status === "DRAFT") {
+        const examQ = await first(`SELECT bank_question_id FROM exam_questions WHERE id=?`, [qId]);
+        if (examQ && examQ.bank_question_id) {
+          const bankQId = examQ.bank_question_id;
+          await run(
+            `UPDATE question_bank SET
+              question_type=?, question_text=?, marks=?, partial_marking=?,
+              model_answer=?, feedback=?, updated_at=?
+             WHERE id=?`,
+            [qType, qText, marks, partialMarking, modelAnswer, feedback, ts, bankQId]
+          );
+          await run(`DELETE FROM question_bank_options WHERE bank_question_id=?`, [bankQId]);
+          // Save bank options from form
+          const bankF = f; // same form data
+          if (qType === "TRUE_FALSE") {
+            const correct = (bankF.tf_correct || "").trim();
+            await run(`INSERT INTO question_bank_options (id,bank_question_id,option_text,is_correct,feedback,sort_order,created_at) VALUES (?,?,?,?,?,?,?)`,
+              [uuid(), bankQId, "True", correct === "True" ? 1 : 0, null, 1, ts]);
+            await run(`INSERT INTO question_bank_options (id,bank_question_id,option_text,is_correct,feedback,sort_order,created_at) VALUES (?,?,?,?,?,?,?)`,
+              [uuid(), bankQId, "False", correct === "False" ? 1 : 0, null, 2, ts]);
+          } else if (qType === "MCQ" || qType === "MULTIPLE_SELECT") {
+            const texts = [].concat(bankF["opt_text[]"] || []);
+            const feedbacks = [].concat(bankF["opt_feedback[]"] || []);
+            const correctIndices = new Set([].concat(bankF["opt_correct[]"] || []).map(v => String(v)));
+            for (let i = 0; i < texts.length; i++) {
+              const text = (texts[i] || "").trim();
+              if (!text) continue;
+              await run(`INSERT INTO question_bank_options (id,bank_question_id,option_text,is_correct,feedback,sort_order,created_at) VALUES (?,?,?,?,?,?,?)`,
+                [uuid(), bankQId, text, correctIndices.has(String(i)) ? 1 : 0, (feedbacks[i] || "").trim() || null, i + 1, ts]);
+            }
+          }
+        }
+      }
 
       return redirect(`/exam-builder?exam_id=${examId}&pane=questions`);
     }
@@ -989,9 +1036,190 @@ export async function handleExamRequest(ctx) {
       // SHORT_ANSWER, ESSAY — no options to save
     }
 
-  } catch (err) {
-    console.error("FATAL [exams]", err);
-    const msg = err && err.stack ? err.stack : String(err);
-    return new Response("FATAL ERROR (exams):\n\n" + msg, { status: 500 });
-  }
-}
+    // =============================
+    // Helper: save bank options
+    // =============================
+    async function saveBankOptions(bankQId, qType, f, ts) {
+      if (qType === "TRUE_FALSE") {
+        const correct = (f.tf_correct || "").trim();
+        await run(`INSERT INTO question_bank_options (id,bank_question_id,option_text,is_correct,feedback,sort_order,created_at) VALUES (?,?,?,?,?,?,?)`,
+          [uuid(), bankQId, "True", correct === "True" ? 1 : 0, null, 1, ts]);
+        await run(`INSERT INTO question_bank_options (id,bank_question_id,option_text,is_correct,feedback,sort_order,created_at) VALUES (?,?,?,?,?,?,?)`,
+          [uuid(), bankQId, "False", correct === "False" ? 1 : 0, null, 2, ts]);
+        return;
+      }
+      if (qType === "MCQ" || qType === "MULTIPLE_SELECT") {
+        const texts = [].concat(f["opt_text[]"] || []);
+        const feedbacks = [].concat(f["opt_feedback[]"] || []);
+        const correctIndices = new Set([].concat(f["opt_correct[]"] || []).map(v => String(v)));
+        for (let i = 0; i < texts.length; i++) {
+          const text = (texts[i] || "").trim();
+          if (!text) continue;
+          await run(`INSERT INTO question_bank_options (id,bank_question_id,option_text,is_correct,feedback,sort_order,created_at) VALUES (?,?,?,?,?,?,?)`,
+            [uuid(), bankQId, text, correctIndices.has(String(i)) ? 1 : 0, (feedbacks[i] || "").trim() || null, i + 1, ts]);
+        }
+      }
+    }
+
+    // =============================
+    // Bank picker — add from bank to exam (POST)
+    // =============================
+    if (path === "/exam-add-from-bank" && request.method === "POST") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active || (active.role !== "TEACHER" && active.role !== "SCHOOL_ADMIN")) return redirect("/");
+
+      const f = await form();
+      const examId = (f.exam_id || "").trim();
+      const exam = await verifyExamAccess(examId, active.tenant_id, r.user.id, active.role);
+      if (!exam) return redirect("/teacher");
+
+      // bank_question_ids is a list of checked questions
+      const bankIds = [].concat(f["bank_ids[]"] || []).filter(Boolean);
+      if (!bankIds.length) return redirect(`/exam-builder?exam_id=${examId}&pane=questions`);
+
+      const ts = nowISO();
+      const maxOrder = await first(`SELECT MAX(sort_order) AS m FROM exam_questions WHERE exam_id=?`, [examId]);
+      let sortOrder = (Number(maxOrder?.m) || 0) + 1;
+
+      for (const bankQId of bankIds) {
+        // Load bank question (must belong to this tenant, visible to this teacher)
+        const bq = await first(
+          `SELECT * FROM question_bank WHERE id=? AND tenant_id=? AND (visibility='SCHOOL' OR created_by=?)`,
+          [bankQId, active.tenant_id, r.user.id]
+        );
+        if (!bq) continue;
+
+        // Check not already in this exam
+        const already = await first(
+          `SELECT id FROM exam_questions WHERE exam_id=? AND bank_question_id=?`,
+          [examId, bankQId]
+        );
+        if (already) continue;
+
+        const qId = uuid();
+        await run(
+          `INSERT INTO exam_questions
+           (id, exam_id, tenant_id, question_type, question_text, marks, sort_order, partial_marking, model_answer, feedback, bank_question_id, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [qId, examId, active.tenant_id, bq.question_type, bq.question_text, bq.marks, sortOrder, bq.partial_marking, bq.model_answer, bq.feedback, bankQId, ts, ts]
+        );
+
+        // Copy options
+        const opts = await all(`SELECT * FROM question_bank_options WHERE bank_question_id=? ORDER BY sort_order ASC`, [bankQId]);
+        for (const o of opts) {
+          await run(
+            `INSERT INTO exam_question_options (id, question_id, option_text, is_correct, feedback, sort_order, created_at) VALUES (?,?,?,?,?,?,?)`,
+            [uuid(), qId, o.option_text, o.is_correct, o.feedback, o.sort_order, ts]
+          );
+        }
+        sortOrder++;
+      }
+
+      return redirect(`/exam-builder?exam_id=${examId}&pane=questions`);
+    }
+
+    // =============================
+    // Bank picker page — browse bank from within exam builder (GET)
+    // =============================
+    if (path === "/exam-bank-picker") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active || (active.role !== "TEACHER" && active.role !== "SCHOOL_ADMIN")) return redirect("/");
+
+      const examId = url.searchParams.get("exam_id") || "";
+      const exam = await verifyExamAccess(examId, active.tenant_id, r.user.id, active.role);
+      if (!exam) return redirect("/teacher");
+
+      const filterType = url.searchParams.get("type") || "ALL";
+      const filterVis = url.searchParams.get("vis") || "ALL";
+
+      // Get bank questions visible to this teacher
+      let where = `WHERE q.tenant_id=? AND (q.visibility='SCHOOL' OR q.created_by=?)`;
+      const params = [active.tenant_id, r.user.id];
+      if (filterType !== "ALL") { where += ` AND q.question_type=?`; params.push(filterType); }
+      if (filterVis === "PERSONAL") { where += ` AND q.visibility='PERSONAL'`; }
+      else if (filterVis === "SCHOOL") { where += ` AND q.visibility='SCHOOL'`; }
+
+      const bankQs = await all(
+        `SELECT q.*, u.name AS creator_name FROM question_bank q
+         JOIN users u ON u.id = q.created_by
+         ${where} ORDER BY q.created_at DESC`,
+        params
+      );
+
+      // Which bank questions are already in this exam?
+      const existing = await all(`SELECT bank_question_id FROM exam_questions WHERE exam_id=? AND bank_question_id IS NOT NULL`, [examId]);
+      const existingIds = new Set(existing.map(e => e.bank_question_id));
+
+      const qTypeLabel = (t) => ({MCQ:"MCQ",MULTIPLE_SELECT:"Multi-select",TRUE_FALSE:"True/False",SHORT_ANSWER:"Short Answer",ESSAY:"Essay"}[t] || t);
+
+      const rows = bankQs.map(q => {
+        const alreadyIn = existingIds.has(q.id);
+        return `
+          <div style="display:flex;gap:10px;align-items:flex-start;border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:12px;margin-bottom:8px;background:${alreadyIn?"#f6f8f7":"#fff"}">
+            <input type="checkbox" name="bank_ids[]" value="${escapeAttr(q.id)}"
+              style="width:auto;flex-shrink:0;transform:scale(1.3);margin-top:3px"
+              ${alreadyIn ? "disabled" : ""} />
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px">
+                <span class="pill" style="font-size:11px">${escapeHtml(qTypeLabel(q.question_type))}</span>
+                <span class="muted small">${escapeHtml(String(q.marks))}m</span>
+                ${alreadyIn ? `<span class="muted small">Already in exam</span>` : ""}
+              </div>
+              <div style="font-size:14px">${escapeHtml(q.question_text)}</div>
+            </div>
+          </div>`;
+      }).join("");
+
+      return page(`
+        <div class="card">
+          <div class="topbar">
+            <div>
+              <div style="font-size:12px;color:rgba(0,0,0,.45);margin-bottom:2px">
+                <a href="/exam-builder?exam_id=${escapeAttr(examId)}&pane=questions">← Back to exam</a>
+              </div>
+              <h1 style="margin:0">Add from Question Bank</h1>
+              <div class="muted small">${escapeHtml(exam.title)}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <form method="get" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:0">
+            <input type="hidden" name="exam_id" value="${escapeAttr(examId)}"/>
+            <div>
+              <label style="margin:0 0 4px">Type</label>
+              <select name="type" onchange="this.form.submit()" style="width:auto;padding:8px">
+                <option value="ALL" ${filterType==="ALL"?"selected":""}>All types</option>
+                <option value="MCQ" ${filterType==="MCQ"?"selected":""}>MCQ</option>
+                <option value="MULTIPLE_SELECT" ${filterType==="MULTIPLE_SELECT"?"selected":""}>Multi-select</option>
+                <option value="TRUE_FALSE" ${filterType==="TRUE_FALSE"?"selected":""}>True/False</option>
+                <option value="SHORT_ANSWER" ${filterType==="SHORT_ANSWER"?"selected":""}>Short Answer</option>
+                <option value="ESSAY" ${filterType==="ESSAY"?"selected":""}>Essay</option>
+              </select>
+            </div>
+            <div>
+              <label style="margin:0 0 4px">Visibility</label>
+              <select name="vis" onchange="this.form.submit()" style="width:auto;padding:8px">
+                <option value="ALL" ${filterVis==="ALL"?"selected":""}>All</option>
+                <option value="PERSONAL" ${filterVis==="PERSONAL"?"selected":""}>Personal</option>
+                <option value="SCHOOL" ${filterVis==="SCHOOL"?"selected":""}>School</option>
+              </select>
+            </div>
+          </form>
+        </div>
+
+        <form method="post" action="/exam-add-from-bank">
+          <input type="hidden" name="exam_id" value="${escapeAttr(examId)}"/>
+          ${bankQs.length > 0 ? rows : `<div class="card" style="text-align:center;padding:32px"><p class="muted">No questions in bank yet. <a href="/question-bank">Go to Question Bank</a> to add some.</p></div>`}
+          ${bankQs.length > 0 ? `
+            <div style="position:sticky;bottom:0;background:#f6f8f7;padding:12px 0;border-top:1px solid rgba(0,0,0,.08);margin-top:8px">
+              <button type="submit" class="btn2">Add selected to exam</button>
+              <a href="/exam-builder?exam_id=${escapeAttr(examId)}&pane=questions" class="btn3" style="display:inline-block;padding:10px 14px;border-radius:10px;text-decoration:none;margin-left:8px">Cancel</a>
+            </div>` : ""}
+        </form>
+      `);
+    }
