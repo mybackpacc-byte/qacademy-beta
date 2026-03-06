@@ -289,3 +289,45 @@ CREATE INDEX IF NOT EXISTS idx_exams_tenant_id        ON exams(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_exams_status           ON exams(status);
 CREATE INDEX IF NOT EXISTS idx_exam_grade_bands_exam  ON exam_grade_bands(exam_id);
 CREATE INDEX IF NOT EXISTS idx_exam_custom_fields_exam ON exam_custom_fields(exam_id);
+
+
+-- =============================================================
+-- QUESTIONS TABLES
+-- Run both of these in your Cloudflare D1 query pane
+-- =============================================================
+
+-- Questions (one row per question)
+CREATE TABLE IF NOT EXISTS exam_questions (
+  id              TEXT PRIMARY KEY,
+  exam_id         TEXT NOT NULL,
+  tenant_id       TEXT NOT NULL,
+  question_type   TEXT NOT NULL,      -- MCQ | MULTIPLE_SELECT | TRUE_FALSE | SHORT_ANSWER | ESSAY
+  question_text   TEXT NOT NULL,
+  marks           REAL NOT NULL DEFAULT 1,
+  sort_order      INTEGER NOT NULL DEFAULT 1,
+  partial_marking INTEGER NOT NULL DEFAULT 1,  -- 1=partial (MULTIPLE_SELECT only)
+  model_answer    TEXT,               -- optional, SHORT_ANSWER only
+  feedback        TEXT,               -- optional, shown during review
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL,
+
+  FOREIGN KEY (exam_id) REFERENCES exams(id),
+  FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+);
+
+-- Answer options (one row per option, MCQ/MULTIPLE_SELECT/TRUE_FALSE only)
+CREATE TABLE IF NOT EXISTS exam_question_options (
+  id            TEXT PRIMARY KEY,
+  question_id   TEXT NOT NULL,
+  option_text   TEXT NOT NULL,
+  is_correct    INTEGER NOT NULL DEFAULT 0,   -- 1 = correct answer
+  feedback      TEXT,                          -- optional, shown during review
+  sort_order    INTEGER NOT NULL DEFAULT 1,
+  created_at    TEXT NOT NULL,
+
+  FOREIGN KEY (question_id) REFERENCES exam_questions(id)
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_exam_questions_exam_id     ON exam_questions(exam_id);
+CREATE INDEX IF NOT EXISTS idx_exam_question_opts_qid     ON exam_question_options(question_id);
