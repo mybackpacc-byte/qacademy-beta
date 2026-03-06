@@ -104,7 +104,13 @@ export async function handleRequest(ctx) {
     async function form() {
       const fd = await request.formData();
       const out = {};
-      for (const [k, v] of fd.entries()) out[k] = String(v).trim();
+      for (const [k] of fd.entries()) {
+        if (out[k] !== undefined) continue; // already handled this key
+        const vals = fd.getAll(k);
+        // If only one value, return a plain string (keeps all existing routes working)
+        // If multiple values (e.g. band_label[], cf_label[]), return an array
+        out[k] = vals.length === 1 ? String(vals[0]).trim() : vals.map((v) => String(v).trim());
+      }
       return out;
     }
 
