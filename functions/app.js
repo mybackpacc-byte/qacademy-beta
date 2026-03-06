@@ -254,24 +254,6 @@ export async function handleAppRequest(ctx) {
       return { ok: false, msg: "Unknown join code scope." };
     }
 
-    // Creates session + sets cookie
-    async function createSessionForUser(userId) {
-      const token = uuid() + "-" + uuid();
-      const tokenHash = await sha256Hex(token);
-      const ts = nowISO();
-      const expires = new Date(Date.now() + 1000 * 60 * 60 * 24 * 7).toISOString(); // 7 days
-
-      await run(
-        "INSERT INTO sessions (token_hash,user_id,active_tenant_id,expires_at,created_at) VALUES (?,?,?,?,?)",
-        [tokenHash, userId, null, expires, ts]
-      );
-
-      return {
-        token,
-        headers: { "Set-Cookie": cookieSet("qa_sess", token, 60 * 60 * 24 * 7) },
-      };
-    }
-
     // ---------- Routes ----------
 
     if (path === "/health") {
