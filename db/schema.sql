@@ -331,3 +331,12 @@ CREATE TABLE IF NOT EXISTS exam_question_options (
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_exam_questions_exam_id     ON exam_questions(exam_id);
 CREATE INDEX IF NOT EXISTS idx_exam_question_opts_qid     ON exam_question_options(question_id);
+
+
+CREATE TABLE exam_access (
+  id TEXT PRIMARY KEY,
+  exam_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  added_by TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
