@@ -13,7 +13,11 @@ export async function onRequest(ctx) {
   if (
     path === "/exam-create" ||
     path === "/exam-builder" ||
-    path === "/exam-save-settings"
+    path === "/exam-save-settings" ||
+    path === "/exam-add-question" ||
+    path === "/exam-update-question" ||
+    path === "/exam-delete-question" ||
+    path === "/exam-reorder-question"
   ) {
     return handleExamRequest(ctx);
   }
