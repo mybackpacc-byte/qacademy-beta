@@ -36,6 +36,18 @@ export async function onRequest(ctx) {
     return handleExamRequest(ctx);
   }
 
+  // School class management routes
+  if (
+    path === "/school-create-class" ||
+    path === "/school-class" ||
+    path === "/school-class-add-student" ||
+    path === "/school-class-remove-student" ||
+    path === "/school-class-enrol-course" ||
+    path === "/school-class-archive"
+  ) {
+    return handleAppRequest(ctx);
+  }
+
   // Everything else goes to app.js
   return handleAppRequest(ctx);
 }
