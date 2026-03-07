@@ -109,6 +109,134 @@ export async function handleAttemptRequest(ctx) {
     }
 
     // =============================
+    // Auto-grading
+    // =============================
+    async function autoGrade(attemptId, tenantId) {
+      // Step 1 — Load everything needed
+      const attempt = await first(
+        `SELECT question_order_json, grade_bands_json FROM exam_attempts WHERE id=? AND tenant_id=?`,
+        [attemptId, tenantId]
+      );
+      if (!attempt) return;
+
+      const answers = await all(
+        `SELECT * FROM exam_answers WHERE attempt_id=?`,
+        [attemptId]
+      );
+      if (answers.length === 0) return;
+
+      const questionIds = answers.map((a) => a.question_id);
+      const questions = await all(
+        `SELECT * FROM exam_questions WHERE id IN (${questionIds.map(() => "?").join(",")})`,
+        questionIds
+      );
+      const qMap = {};
+      for (const q of questions) qMap[q.id] = q;
+
+      const allOpts = await all(
+        `SELECT * FROM exam_question_options WHERE question_id IN (${questionIds.map(() => "?").join(",")})`,
+        questionIds
+      );
+      const optsByQ = {};
+      for (const o of allOpts) {
+        if (!optsByQ[o.question_id]) optsByQ[o.question_id] = [];
+        optsByQ[o.question_id].push(o);
+      }
+
+      // Step 2 — Grade each answer
+      const ts = nowISO();
+      for (const ans of answers) {
+        const q = qMap[ans.question_id];
+        if (!q) continue;
+        const qtype = q.question_type;
+
+        // SHORT_ANSWER / ESSAY require manual grading — skip
+        if (qtype === "SHORT_ANSWER" || qtype === "ESSAY") continue;
+
+        const opts = optsByQ[q.id] || [];
+        let scoreAwarded = 0;
+
+        if (qtype === "MCQ" || qtype === "TRUE_FALSE") {
+          if (ans.answer_json !== null && ans.answer_json !== undefined) {
+            let selectedId = null;
+            try { selectedId = JSON.parse(ans.answer_json); } catch(e) {}
+            if (selectedId) {
+              const chosen = opts.find((o) => o.id === selectedId);
+              if (chosen && Number(chosen.is_correct) === 1) {
+                scoreAwarded = Number(q.marks);
+              }
+            }
+          }
+        } else if (qtype === "MULTIPLE_SELECT") {
+          if (ans.answer_json !== null && ans.answer_json !== undefined) {
+            let selected = [];
+            try { selected = JSON.parse(ans.answer_json); } catch(e) {}
+            if (!Array.isArray(selected)) selected = [];
+
+            const correctIds = opts.filter((o) => Number(o.is_correct) === 1).map((o) => o.id);
+            const incorrectIds = opts.filter((o) => Number(o.is_correct) === 0).map((o) => o.id);
+
+            if (!Number(q.partial_marking)) {
+              // All-or-nothing: must select ALL correct and NO incorrect
+              const sel = new Set(selected);
+              const allCorrect = correctIds.every((id) => sel.has(id));
+              const noIncorrect = incorrectIds.every((id) => !sel.has(id));
+              if (allCorrect && noIncorrect) scoreAwarded = Number(q.marks);
+            } else {
+              // Partial marking: unit value per correct option
+              const totalCorrect = correctIds.length;
+              if (totalCorrect > 0) {
+                const unit = Number(q.marks) / totalCorrect;
+                let raw = 0;
+                for (const id of selected) {
+                  if (correctIds.includes(id)) raw += unit;
+                  else if (incorrectIds.includes(id)) raw -= unit;
+                }
+                scoreAwarded = Math.max(0, Math.round(raw * 100) / 100);
+              }
+            }
+          }
+        }
+
+        await run(
+          `UPDATE exam_answers SET score_awarded=?, updated_at=? WHERE attempt_id=? AND question_id=?`,
+          [scoreAwarded, ts, attemptId, ans.question_id]
+        );
+      }
+
+      // Step 3 — Calculate totals
+      const gradedAnswers = await all(
+        `SELECT score_awarded FROM exam_answers WHERE attempt_id=?`,
+        [attemptId]
+      );
+      const scoreRaw = gradedAnswers.reduce((sum, a) =>
+        sum + (a.score_awarded !== null && a.score_awarded !== undefined ? Number(a.score_awarded) : 0), 0);
+      const scoreTotal = questions.reduce((sum, q) => sum + Number(q.marks), 0);
+      const scorePct = scoreTotal > 0 ? Math.round((scoreRaw / scoreTotal) * 10000) / 100 : 0;
+
+      // Grade band (bands are ordered by min_percent DESC)
+      let grade = null;
+      try {
+        const bands = JSON.parse(attempt.grade_bands_json || "[]");
+        for (const band of bands) {
+          if (scorePct >= Number(band.min_percent)) { grade = band.label; break; }
+        }
+      } catch(e) {}
+
+      // grading_status: FULLY_GRADED if no manual questions, AUTO_GRADED if any need manual review
+      const hasManual = questions.some((q) =>
+        q.question_type === "SHORT_ANSWER" || q.question_type === "ESSAY"
+      );
+      const gradingStatus = hasManual ? "AUTO_GRADED" : "FULLY_GRADED";
+
+      // Step 4 — Write results back to attempt
+      await run(
+        `UPDATE exam_attempts SET score_raw=?, score_total=?, score_pct=?, grade=?, grading_status=?, updated_at=? WHERE id=? AND tenant_id=?`,
+        [scoreRaw, scoreTotal, scorePct, grade, gradingStatus, ts, attemptId, tenantId]
+      );
+    }
+
+    // =============================
     // Wizard render helpers
     // =============================
     function renderPasswordStep(exam, examId, errorMsg) {
@@ -1105,6 +1233,7 @@ export async function handleAttemptRequest(ctx) {
           `UPDATE exam_attempts SET status='SUBMITTED', submitted_at=?, time_taken_secs=?, auto_submitted=?, is_late=?, updated_at=? WHERE id=?`,
           [submittedAt, timeTakenSecs, isAutoSubmit, isLate, ts, attemptId]
         );
+        await autoGrade(attemptId, active.tenant_id);
         return redirect(`/attempt-complete?attempt_id=${attemptId}`);
       }
 
