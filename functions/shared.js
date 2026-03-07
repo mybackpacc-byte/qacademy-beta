@@ -237,3 +237,61 @@ export function createHelpers(request, env) {
     setActiveTenantForCurrentSession, createSessionForUser,
   };
 }
+
+/**
+ * Recalculate and persist score / grade / grading_status for a submitted attempt.
+ * Called by autoGrade (after per-answer scoring) and by the manual grading POST.
+ *
+ * @param {string} attemptId
+ * @param {string} tenantId
+ * @param {D1Database} db  — pass env.DB directly
+ */
+export async function recalcAttempt(attemptId, tenantId, db) {
+  const first = async (sql, params = []) => await db.prepare(sql).bind(...params).first();
+  const all = async (sql, params = []) => {
+    const res = await db.prepare(sql).bind(...params).all();
+    return res.results || [];
+  };
+  const run = async (sql, params = []) => await db.prepare(sql).bind(...params).run();
+
+  const attempt = await first(
+    `SELECT id, grade_bands_json FROM exam_attempts WHERE id=? AND tenant_id=?`,
+    [attemptId, tenantId]
+  );
+  if (!attempt) return;
+
+  // Join answers with questions to get marks and question_type in one query
+  const rows = await all(
+    `SELECT a.score_awarded, q.marks, q.question_type
+     FROM exam_answers a
+     JOIN exam_questions q ON q.id = a.question_id
+     WHERE a.attempt_id=?`,
+    [attemptId]
+  );
+  if (rows.length === 0) return;
+
+  const scoreTotal = rows.reduce((sum, r) => sum + Number(r.marks || 0), 0);
+  const scoreRaw = rows.reduce((sum, r) =>
+    sum + (r.score_awarded !== null && r.score_awarded !== undefined ? Number(r.score_awarded) : 0), 0);
+  const scorePct = scoreTotal > 0 ? Math.round((scoreRaw / scoreTotal) * 10000) / 100 : 0;
+
+  let grade = null;
+  try {
+    const bands = JSON.parse(attempt.grade_bands_json || "[]");
+    for (const band of bands) {
+      if (scorePct >= Number(band.min_percent)) { grade = band.label; break; }
+    }
+  } catch(e) {}
+
+  // AUTO_GRADED only if a manual question still has no score awarded
+  const needsManual = rows.some(
+    (r) => (r.question_type === "SHORT_ANSWER" || r.question_type === "ESSAY") && r.score_awarded === null
+  );
+  const gradingStatus = needsManual ? "AUTO_GRADED" : "FULLY_GRADED";
+
+  const ts = new Date().toISOString();
+  await run(
+    `UPDATE exam_attempts SET score_raw=?, score_total=?, score_pct=?, grade=?, grading_status=?, updated_at=? WHERE id=? AND tenant_id=?`,
+    [scoreRaw, scoreTotal, scorePct, grade, gradingStatus, ts, attemptId, tenantId]
+  );
+}
