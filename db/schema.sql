@@ -310,6 +310,108 @@ CREATE TABLE IF NOT EXISTS progress_log (
 
 
 -- ============================================================
+-- EXAM TAKING ENGINE TABLES
+-- ============================================================
+
+-- 21. exam_attempts — one row per student attempt at an exam
+CREATE TABLE IF NOT EXISTS exam_attempts (
+  id                      TEXT PRIMARY KEY,
+  tenant_id               TEXT NOT NULL,        -- isolation
+  exam_id                 TEXT NOT NULL,        -- which exam
+  user_id                 TEXT NOT NULL,        -- references users.id
+  sitting_id              TEXT,                 -- nullable — set if exam belongs to a sitting
+  attempt_no              INTEGER NOT NULL DEFAULT 1, -- 1, 2, 3 based on max_attempts
+
+  -- Lifecycle
+  status                  TEXT NOT NULL DEFAULT 'IN_PROGRESS', -- IN_PROGRESS | SUBMITTED | ABANDONED
+
+  -- Timing
+  started_at              TEXT NOT NULL,        -- when student clicked Start
+  submitted_at            TEXT,                 -- null if still in progress
+  effective_duration_secs INTEGER NOT NULL,     -- actual time allocated — may be less than full duration if exam closes soon
+  time_taken_secs         INTEGER,              -- calculated on submit — actual time spent
+  auto_submitted          INTEGER NOT NULL DEFAULT 0, -- 1 if timer or server force-submitted
+  is_late                 INTEGER NOT NULL DEFAULT 0, -- 1 if submitted after ends_at
+
+  -- Pre-exam data
+  question_order_json     TEXT NOT NULL,        -- actual order questions were presented (critical when shuffle is on)
+  custom_fields_json      TEXT,                 -- student responses to custom fields collected before starting
+
+  -- Grading & scores (filled after grading)
+  score_raw               REAL,                 -- total marks awarded
+  score_total             REAL,                 -- total possible marks at time of sitting
+  score_pct               REAL,                 -- score_raw / score_total * 100
+  grade                   TEXT,                 -- computed band label e.g. Distinction, Pass, Fail
+  grading_status          TEXT NOT NULL DEFAULT 'PENDING', -- PENDING | AUTO_GRADED | FULLY_GRADED
+
+  -- Snapshotted settings (so results always reflect what was set when student sat the exam)
+  score_display           TEXT NOT NULL,        -- snapshotted from exams.score_display
+  pass_mark_percent       REAL,                 -- snapshotted from exams.pass_mark_percent
+  grade_bands_json        TEXT,                 -- snapshotted from exams.grade_bands at time of sitting
+
+  created_at              TEXT NOT NULL,
+  updated_at              TEXT NOT NULL
+);
+
+-- 22. exam_answers — one row per question per attempt
+CREATE TABLE IF NOT EXISTS exam_answers (
+  id              TEXT PRIMARY KEY,
+  attempt_id      TEXT NOT NULL,            -- references exam_attempts.id
+  question_id     TEXT NOT NULL,            -- references exam_questions.id
+  question_type   TEXT NOT NULL,            -- snapshotted — grading always knows the type
+
+  -- Student response
+  answer_json     TEXT,                     -- flexible: selected option ID for MCQ, text for essay, etc. null if skipped
+  is_flagged      INTEGER NOT NULL DEFAULT 0, -- 1 if student flagged for review during exam
+  time_spent_secs INTEGER,                  -- how long student spent on this question
+
+  -- Grading (filled after submission)
+  score_awarded   REAL,                     -- marks given for this answer
+  teacher_note    TEXT,                     -- teacher comment when manually grading
+  graded_by       TEXT,                     -- user_id of teacher who graded
+  graded_at       TEXT,                     -- when this answer was graded
+
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+
+-- 23. exam_sittings — groups multiple exam papers into one sitting (School Admin controlled)
+CREATE TABLE IF NOT EXISTS exam_sittings (
+  id            TEXT PRIMARY KEY,
+  tenant_id     TEXT NOT NULL,              -- isolation
+  title         TEXT NOT NULL,              -- e.g. "Year 1 Semester 2 Finals 2026"
+  description   TEXT,                       -- optional details
+  academic_year TEXT,                       -- e.g. "2025/26" for filtering and reporting
+  status        TEXT NOT NULL DEFAULT 'DRAFT', -- DRAFT | ACTIVE | CLOSED
+  created_by    TEXT NOT NULL,              -- School Admin who created it
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+
+-- 24. exam_sitting_papers — which exams belong to which sitting
+CREATE TABLE IF NOT EXISTS exam_sitting_papers (
+  id          TEXT PRIMARY KEY,
+  sitting_id  TEXT NOT NULL,                -- references exam_sittings.id
+  exam_id     TEXT NOT NULL,                -- references exams.id
+  sort_order  INTEGER NOT NULL DEFAULT 0,   -- display order of papers within the sitting
+  created_at  TEXT NOT NULL
+);
+
+
+-- ============================================================
+-- INDEXES
+-- Critical for performance at scale — without these, queries
+-- slow down significantly as data grows.
+-- ============================================================
+
+CREATE INDEX IF NOT EXISTS idx_exam_attempts_exam_id    ON exam_attempts(exam_id);
+CREATE INDEX IF NOT EXISTS idx_exam_attempts_user_id    ON exam_attempts(user_id);
+CREATE INDEX IF NOT EXISTS idx_exam_attempts_sitting_id ON exam_attempts(sitting_id);
+CREATE INDEX IF NOT EXISTS idx_exam_answers_attempt_id  ON exam_answers(attempt_id);
+CREATE INDEX IF NOT EXISTS idx_exam_answers_question_id ON exam_answers(question_id);
+
+
+-- ============================================================
 -- MIGRATIONS LOG
 -- (for reference only — these were run on the live database
 --  as ALTER TABLE statements. They are already baked into the
