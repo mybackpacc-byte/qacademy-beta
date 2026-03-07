@@ -499,8 +499,26 @@ export async function handleAttemptRequest(ctx) {
       const showWarning = attempt.effective_duration_secs < fullDurationSecs;
       const warningMins = Math.ceil(attempt.effective_duration_secs / 60);
 
+      // Initial answer/flag state arrays (used by inline JS)
+      const initialAnswered = questions.map((q) => {
+        const a = ansMap[q.id];
+        if (!a || a.answer_json === null || a.answer_json === undefined) return false;
+        try {
+          const p = JSON.parse(a.answer_json);
+          if (p === null || p === undefined) return false;
+          if (typeof p === "string") return p.trim() !== "";
+          if (Array.isArray(p)) return p.length > 0;
+          return true;
+        } catch(e) { return false; }
+      });
+      const initialFlagged = questions.map((q) => {
+        const a = ansMap[q.id];
+        return a ? Number(a.is_flagged) === 1 : false;
+      });
+
       // Build individual question card HTML
-      function buildQuestion(q, idx, savedAns) {
+      // showFlagBtn: true for FREE mode, false for SEQUENTIAL
+      function buildQuestion(q, idx, savedAns, showFlagBtn) {
         const opts = optsByQ[q.id] || [];
         const isFlagged = savedAns ? Number(savedAns.is_flagged) : 0;
         let parsed = null;
@@ -537,7 +555,16 @@ export async function handleAttemptRequest(ctx) {
           ? `<span class="muted" style="font-size:12px">${escapeHtml(String(q.marks))} mark${Number(q.marks) !== 1 ? "s" : ""}</span>`
           : "";
 
-        const hidden = isSequential && idx !== currentQIdx;
+        const flagHtml = showFlagBtn ? `
+          <input type="hidden" name="flag[${escapeAttr(q.id)}]" id="flag-${escapeAttr(q.id)}" value="${isFlagged ? "1" : "0"}" />
+          <button type="button" class="flag-btn" data-qid="${escapeAttr(q.id)}" onclick="toggleFlag(this)"
+            style="background:${isFlagged ? "#fff3cd" : "rgba(0,0,0,.06)"};border:1px solid ${isFlagged ? "#ffc107" : "rgba(0,0,0,.12)"};border-radius:8px;padding:5px 10px;cursor:pointer;font-size:12px;font-weight:700">
+            ${isFlagged ? "🚩 Flagged" : "🏳 Flag"}
+          </button>
+        ` : "";
+
+        // FREE: show only first card initially; SEQUENTIAL: show only currentQIdx
+        const hidden = isSequential ? (idx !== currentQIdx) : (idx !== 0);
         return `
           <div class="card question-card" data-idx="${idx}" data-qid="${escapeAttr(q.id)}"
                style="${hidden ? "display:none" : ""}">
@@ -547,11 +574,7 @@ export async function handleAttemptRequest(ctx) {
               </div>
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                 ${marksHtml}
-                <input type="hidden" name="flag[${escapeAttr(q.id)}]" id="flag-${escapeAttr(q.id)}" value="${isFlagged ? "1" : "0"}" />
-                <button type="button" class="flag-btn" data-qid="${escapeAttr(q.id)}" onclick="toggleFlag(this)"
-                  style="background:${isFlagged ? "#fff3cd" : "rgba(0,0,0,.06)"};border:1px solid ${isFlagged ? "#ffc107" : "rgba(0,0,0,.12)"};border-radius:8px;padding:5px 10px;cursor:pointer;font-size:12px;font-weight:700">
-                  ${isFlagged ? "🚩 Flagged" : "🏳 Flag"}
-                </button>
+                ${flagHtml}
               </div>
             </div>
             <div style="font-size:15px;margin-bottom:16px;line-height:1.6">${escapeHtml(q.question_text)}</div>
@@ -560,20 +583,69 @@ export async function handleAttemptRequest(ctx) {
         `;
       }
 
-      const questionsHtml = questions.map((q, i) => buildQuestion(q, i, ansMap[q.id])).join("");
+      const questionsHtml = questions.map((q, i) => buildQuestion(q, i, ansMap[q.id], !isSequential)).join("");
 
-      // Sequential nav bar (rendered once, updated by JS)
+      // SEQUENTIAL: forward-only nav; Next becomes Submit on last question
       const seqNavHtml = isSequential ? `
-        <div style="display:flex;gap:10px;justify-content:space-between;align-items:center;margin-top:8px">
-          <button type="button" id="btn-prev" onclick="navTo(currentQ-1)" class="btn3"
-            ${currentQIdx === 0 ? "disabled" : ""}
-            style="${currentQIdx === 0 ? "opacity:.35;cursor:not-allowed" : ""}">← Previous</button>
+        <div style="display:flex;gap:10px;justify-content:flex-end;align-items:center;margin-top:8px">
           <div id="btn-next-wrap">
             ${currentQIdx === totalQ - 1
-              ? `<button type="submit" name="action" value="submit" onclick="return confirm('Are you sure you want to submit? You cannot return to this exam.')" class="btn2" style="padding:10px 20px">Submit Exam</button>`
-              : `<button type="button" id="btn-next" onclick="navTo(currentQ+1)" class="btn2">Next →</button>`
+              ? `<button type="submit" name="action" value="submit" onclick="return confirmSubmit()" class="btn2" style="padding:10px 20px">Submit Exam</button>`
+              : `<button type="button" id="btn-next" onclick="navTo(currentQ+1)" class="btn2">Next &#x2192;</button>`
             }
           </div>
+        </div>
+      ` : "";
+
+      // FREE: two-column desktop layout + sticky sidebar grid + mobile drawer
+      const freeMainHtml = !isSequential ? `
+        <div class="exam-layout">
+          <div class="exam-main">
+            ${questionsHtml}
+            <div style="display:flex;gap:10px;justify-content:space-between;align-items:center;margin-top:8px">
+              <button type="button" id="btn-prev" onclick="freeNav(-1)" class="btn3"
+                style="opacity:.35;cursor:not-allowed" disabled>&#x2190; Previous</button>
+              <div id="free-btn-next-wrap">
+                <button type="button" id="btn-next" onclick="freeNav(1)" class="btn2">Next &#x2192;</button>
+              </div>
+            </div>
+            <div style="margin-top:16px;text-align:right">
+              <button type="submit" name="action" value="submit" onclick="return confirmSubmit()"
+                class="btn2" style="padding:12px 24px;font-size:15px">Submit Exam</button>
+            </div>
+          </div>
+          <div class="exam-sidebar">
+            <div class="card" style="padding:14px">
+              <div style="font-weight:700;font-size:13px;margin-bottom:10px">Questions</div>
+              <div style="display:flex;gap:4px;margin-bottom:10px">
+                <button type="button" class="grid-view-btn active" data-view="all" onclick="setView('all')">All</button>
+                <button type="button" class="grid-view-btn" data-view="flagged" onclick="setView('flagged')">&#x1F6A9; Flagged</button>
+                <button type="button" class="grid-view-btn" data-view="unanswered" onclick="setView('unanswered')">&#x25A1; Unanswered</button>
+              </div>
+              <div id="grid-banner" style="display:none;font-size:12px;color:rgba(0,0,0,.55);background:#f6f8f7;border-radius:8px;padding:6px 10px;margin-bottom:8px"></div>
+              <div id="question-grid" class="question-grid"></div>
+            </div>
+          </div>
+        </div>
+        <button type="button" id="mobile-grid-btn" onclick="openDrawer()">
+          &#x1F4CB; Questions <span id="mobile-flag-badge" style="display:none"></span>
+        </button>
+        <div id="drawer-overlay" onclick="closeDrawer()"
+          style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:1000"></div>
+        <div id="mobile-drawer"
+          style="display:none;position:fixed;bottom:0;left:0;right:0;background:#fff;border-radius:16px 16px 0 0;padding:16px;z-index:1001;max-height:70vh;overflow-y:auto">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+            <div style="font-weight:700;font-size:14px">Questions</div>
+            <button type="button" onclick="closeDrawer()"
+              style="background:none;border:none;font-size:20px;cursor:pointer;padding:4px;color:rgba(0,0,0,.5)">&#x2715;</button>
+          </div>
+          <div style="display:flex;gap:4px;margin-bottom:10px">
+            <button type="button" class="grid-view-btn active" data-view="all" onclick="setView('all')">All</button>
+            <button type="button" class="grid-view-btn" data-view="flagged" onclick="setView('flagged')">&#x1F6A9; Flagged</button>
+            <button type="button" class="grid-view-btn" data-view="unanswered" onclick="setView('unanswered')">&#x25A1; Unanswered</button>
+          </div>
+          <div id="mob-grid-banner" style="display:none;font-size:12px;color:rgba(0,0,0,.55);background:#f6f8f7;border-radius:8px;padding:6px 10px;margin-bottom:8px"></div>
+          <div id="mob-question-grid" class="question-grid"></div>
         </div>
       ` : "";
 
@@ -587,6 +659,21 @@ export async function handleAttemptRequest(ctx) {
           .save-toast{position:fixed;bottom:20px;right:20px;padding:8px 14px;border-radius:10px;font-size:13px;font-weight:700;display:none;z-index:9999}
           .save-ok{background:#d4f5e9;color:#0b7a75;border:1px solid rgba(11,122,117,.2)}
           .save-err{background:#fff3f3;color:#c00;border:1px solid rgba(255,0,0,.2)}
+          .exam-layout{display:grid;grid-template-columns:1fr 220px;gap:16px;align-items:start}
+          .exam-sidebar{position:sticky;top:16px}
+          .question-grid{display:flex;flex-wrap:wrap;gap:6px}
+          .grid-sq{width:36px;height:36px;border-radius:8px;border:2px solid transparent;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;background:#eaeef0;color:#1f2a28}
+          .grid-sq.sq-answered{background:#d4f5e9;color:#0b7a75}
+          .grid-sq.sq-flagged{background:#fff3cd;color:#c67000}
+          .grid-sq.sq-current{border-color:#0b7a75 !important}
+          .grid-view-btn{background:#eaeef0;color:#1f2a28;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:5px 8px;font-size:11px;font-weight:700;cursor:pointer;flex:1}
+          .grid-view-btn.active{background:#0b7a75;color:#fff;border-color:#0b7a75}
+          #mobile-grid-btn{position:fixed;bottom:20px;right:20px;background:#0b7a75;color:#fff;border:none;border-radius:24px;padding:10px 16px;font-size:14px;font-weight:700;cursor:pointer;z-index:990;display:none;align-items:center;gap:6px;box-shadow:0 4px 12px rgba(0,0,0,.2)}
+          @media(max-width:768px){
+            .exam-layout{grid-template-columns:1fr}
+            .exam-sidebar{display:none}
+            #mobile-grid-btn{display:flex !important}
+          }
         </style>
 
         <form id="exam-form" method="post" action="/attempt-take">
@@ -596,7 +683,7 @@ export async function handleAttemptRequest(ctx) {
 
           <div class="card q-topbar">
             <div>
-              <div style="font-size:12px;color:rgba(0,0,0,.45);margin-bottom:2px"><a href="/student">← My Exams</a></div>
+              <div style="font-size:12px;color:rgba(0,0,0,.45);margin-bottom:2px"><a href="/student">&#x2190; My Exams</a></div>
               <h1 style="margin:0;font-size:17px">${escapeHtml(exam.title)}</h1>
             </div>
             <div id="exam-timer" class="timer-box">${fmtSecs(timeRemainingSecs)}</div>
@@ -604,18 +691,10 @@ export async function handleAttemptRequest(ctx) {
 
           ${showWarning ? `<div class="warn-banner"><b>Note:</b> This exam closes soon. You have <b>${warningMins} minute${warningMins !== 1 ? "s" : ""}</b> available, not the full ${exam.duration_mins} minutes.</div>` : ""}
 
-          ${questionsHtml}
-
-          ${isSequential ? seqNavHtml : `
-            <div style="margin-top:16px;text-align:right">
-              <button type="submit" name="action" value="submit"
-                onclick="return confirm('Are you sure you want to submit? You cannot return to this exam.')"
-                class="btn2" style="padding:12px 24px;font-size:15px">Submit Exam</button>
-            </div>
-          `}
+          ${isSequential ? questionsHtml + seqNavHtml : freeMainHtml}
         </form>
 
-        <div id="save-toast" class="save-toast save-ok">Saved ✓</div>
+        <div id="save-toast" class="save-toast save-ok">Saved &#x2713;</div>
 
         <script>
           // ---- Timer ----
@@ -687,27 +766,41 @@ export async function handleAttemptRequest(ctx) {
           }
           scheduleSave();
 
-          // ---- Flag toggle ----
-          function toggleFlag(btn) {
-            var qid = btn.dataset.qid;
-            var hidden = document.getElementById('flag-' + qid);
-            var wasFlagged = hidden.value === '1';
-            hidden.value = wasFlagged ? '0' : '1';
-            if (!wasFlagged) {
-              btn.style.background = '#fff3cd';
-              btn.style.borderColor = '#ffc107';
-              btn.textContent = '\uD83D\uDEA9 Flagged';
-            } else {
-              btn.style.background = 'rgba(0,0,0,.06)';
-              btn.style.borderColor = 'rgba(0,0,0,.12)';
-              btn.textContent = '\uD83C\uDFF3 Flag';
-            }
+          // ---- Pre-submit confirm (counts unanswered live) ----
+          var answeredState;
+          function confirmSubmit() {
+            var unanswered = answeredState ? answeredState.filter(function(v) { return !v; }).length : 0;
+            var msg = unanswered > 0
+              ? 'You have ' + unanswered + ' unanswered question' + (unanswered !== 1 ? 's' : '') + '. Are you sure you want to submit? You cannot return to this exam.'
+              : 'Are you sure you want to submit? You cannot return to this exam.';
+            return confirm(msg);
           }
 
           ${isSequential ? `
-          // ---- Sequential navigation ----
+          // ---- Sequential navigation (forward-only) ----
           var currentQ = ${currentQIdx};
           var totalQ = ${totalQ};
+          answeredState = ${JSON.stringify(initialAnswered)};
+
+          document.querySelectorAll('.question-card').forEach(function(card) {
+            var idx = parseInt(card.dataset.idx);
+            card.querySelectorAll('input[type=radio], input[type=checkbox]').forEach(function(inp) {
+              inp.addEventListener('change', function() {
+                var radios = card.querySelectorAll('input[type=radio]');
+                var checks = card.querySelectorAll('input[type=checkbox]');
+                if (radios.length > 0) {
+                  answeredState[idx] = Array.from(radios).some(function(r) { return r.checked; });
+                } else {
+                  answeredState[idx] = Array.from(checks).some(function(c) { return c.checked; });
+                }
+              });
+            });
+            card.querySelectorAll('textarea').forEach(function(ta) {
+              ta.addEventListener('input', function() {
+                answeredState[idx] = ta.value.trim() !== '';
+              });
+            });
+          });
 
           function navTo(idx) {
             if (idx < 0 || idx >= totalQ) return;
@@ -717,24 +810,200 @@ export async function handleAttemptRequest(ctx) {
             currentQ = idx;
             document.getElementById('seq-q').value = idx;
             window.scrollTo(0, 0);
-            // Update prev button
-            var prev = document.getElementById('btn-prev');
-            if (prev) {
-              prev.disabled = idx === 0;
-              prev.style.opacity = idx === 0 ? '.35' : '1';
-              prev.style.cursor = idx === 0 ? 'not-allowed' : '';
-            }
-            // Update next/submit wrap
             var wrap = document.getElementById('btn-next-wrap');
             if (wrap) {
               if (idx === totalQ - 1) {
-                wrap.innerHTML = '<button type="submit" name="action" value="submit" onclick="return confirm(\\'Are you sure you want to submit? You cannot return to this exam.\\')" class="btn2" style="padding:10px 20px">Submit Exam</button>';
+                wrap.innerHTML = '<button type="submit" name="action" value="submit" onclick="return confirmSubmit()" class="btn2" style="padding:10px 20px">Submit Exam</button>';
               } else {
                 wrap.innerHTML = '<button type="button" id="btn-next" onclick="navTo(currentQ+1)" class="btn2">Next \u2192</button>';
               }
             }
           }
-          ` : ""}
+          ` : `
+          // ---- FREE mode navigation & grid ----
+          var totalQ = ${totalQ};
+          answeredState = ${JSON.stringify(initialAnswered)};
+          var flaggedState = ${JSON.stringify(initialFlagged)};
+          var currentView = 'all';
+          var currentIdx = 0;
+
+          function getFilteredList() {
+            var list = [];
+            for (var i = 0; i < totalQ; i++) {
+              if (currentView === 'all') list.push(i);
+              else if (currentView === 'flagged' && flaggedState[i]) list.push(i);
+              else if (currentView === 'unanswered' && !answeredState[i]) list.push(i);
+            }
+            return list;
+          }
+
+          function jumpTo(absIdx) {
+            currentIdx = absIdx;
+            document.querySelectorAll('.question-card').forEach(function(el) {
+              el.style.display = parseInt(el.dataset.idx) === absIdx ? '' : 'none';
+            });
+            window.scrollTo(0, 0);
+            updateGrid();
+            updateNavBtns();
+          }
+
+          function freeNav(dir) {
+            var list = getFilteredList();
+            if (list.length === 0) return;
+            var pos = list.indexOf(currentIdx);
+            var newPos = pos + dir;
+            if (newPos < 0 || newPos >= list.length) return;
+            jumpTo(list[newPos]);
+          }
+
+          function updateNavBtns() {
+            var list = getFilteredList();
+            var pos = list.indexOf(currentIdx);
+            var prevBtn = document.getElementById('btn-prev');
+            var nextWrap = document.getElementById('free-btn-next-wrap');
+            if (prevBtn) {
+              prevBtn.disabled = pos <= 0;
+              prevBtn.style.opacity = pos <= 0 ? '.35' : '1';
+              prevBtn.style.cursor = pos <= 0 ? 'not-allowed' : '';
+            }
+            if (nextWrap) {
+              if (pos >= list.length - 1) {
+                nextWrap.innerHTML = '';
+              } else {
+                nextWrap.innerHTML = '<button type="button" id="btn-next" onclick="freeNav(1)" class="btn2">Next \u2192</button>';
+              }
+            }
+          }
+
+          function setView(view) {
+            currentView = view;
+            document.querySelectorAll('.grid-view-btn').forEach(function(btn) {
+              btn.classList.toggle('active', btn.dataset.view === view);
+            });
+            var bannerText = view === 'flagged' ? 'Showing flagged questions only'
+                           : view === 'unanswered' ? 'Showing unanswered questions only' : '';
+            ['grid-banner', 'mob-grid-banner'].forEach(function(id) {
+              var el = document.getElementById(id);
+              if (!el) return;
+              el.style.display = bannerText ? '' : 'none';
+              el.textContent = bannerText;
+            });
+            var list = getFilteredList();
+            if (list.length > 0) { jumpTo(list[0]); } else { updateGrid(); updateNavBtns(); }
+          }
+
+          function updateGrid() {
+            var list = getFilteredList();
+            ['question-grid', 'mob-question-grid'].forEach(function(gid) {
+              var grid = document.getElementById(gid);
+              if (!grid) return;
+              grid.innerHTML = '';
+              if (list.length === 0) {
+                var msg = currentView === 'flagged' ? 'No flagged questions yet'
+                        : currentView === 'unanswered' ? 'All questions answered \u2713' : '';
+                if (msg) {
+                  var p = document.createElement('p');
+                  p.style.cssText = 'font-size:13px;color:rgba(0,0,0,.5);margin:0;padding:4px 0';
+                  p.textContent = msg;
+                  grid.appendChild(p);
+                }
+                return;
+              }
+              list.forEach(function(absIdx) {
+                var btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'grid-sq';
+                btn.textContent = absIdx + 1;
+                (function(ai) { btn.onclick = function() { jumpTo(ai); closeDrawer(); }; })(absIdx);
+                if (flaggedState[absIdx]) { btn.classList.add('sq-flagged'); }
+                else if (answeredState[absIdx]) { btn.classList.add('sq-answered'); }
+                if (absIdx === currentIdx) btn.classList.add('sq-current');
+                grid.appendChild(btn);
+              });
+            });
+            var flagCount = flaggedState.filter(Boolean).length;
+            var badge = document.getElementById('mobile-flag-badge');
+            if (badge) {
+              if (flagCount > 0) { badge.textContent = '\uD83D\uDEA9' + flagCount; badge.style.display = ''; }
+              else { badge.style.display = 'none'; }
+            }
+          }
+
+          // ---- Flag toggle (FREE mode) ----
+          function toggleFlag(btn) {
+            var qid = btn.dataset.qid;
+            var hidden = document.getElementById('flag-' + qid);
+            var wasFlagged = hidden.value === '1';
+            hidden.value = wasFlagged ? '0' : '1';
+            if (!wasFlagged) {
+              btn.style.background = '#fff3cd'; btn.style.borderColor = '#ffc107';
+              btn.textContent = '\uD83D\uDEA9 Flagged';
+              flaggedState[currentIdx] = true;
+            } else {
+              btn.style.background = 'rgba(0,0,0,.06)'; btn.style.borderColor = 'rgba(0,0,0,.12)';
+              btn.textContent = '\uD83C\uDFF3 Flag';
+              flaggedState[currentIdx] = false;
+            }
+            updateGrid();
+            if (currentView === 'flagged' && !flaggedState[currentIdx]) {
+              var list = getFilteredList();
+              if (list.length > 0) jumpTo(list[0]); else { updateGrid(); updateNavBtns(); }
+            }
+          }
+
+          // ---- Answer change listeners ----
+          document.querySelectorAll('.question-card').forEach(function(card) {
+            var idx = parseInt(card.dataset.idx);
+            function advanceUnanswered() {
+              var remaining = [];
+              for (var i = 0; i < totalQ; i++) { if (!answeredState[i]) remaining.push(i); }
+              if (remaining.length === 0) { updateGrid(); updateNavBtns(); return; }
+              var after = remaining.filter(function(i) { return i > currentIdx; });
+              var target = after.length > 0 ? after[0] : remaining[0];
+              setTimeout(function() { jumpTo(target); }, 300);
+            }
+            card.querySelectorAll('input[type=radio]').forEach(function(inp) {
+              inp.addEventListener('change', function() {
+                answeredState[idx] = true;
+                updateGrid();
+                if (currentView === 'unanswered') advanceUnanswered();
+                scheduleSave();
+              });
+            });
+            card.querySelectorAll('input[type=checkbox]').forEach(function(inp) {
+              inp.addEventListener('change', function() {
+                var checks = card.querySelectorAll('input[type=checkbox]');
+                answeredState[idx] = Array.from(checks).some(function(c) { return c.checked; });
+                updateGrid();
+                if (currentView === 'unanswered' && answeredState[idx]) advanceUnanswered();
+                scheduleSave();
+              });
+            });
+            card.querySelectorAll('textarea').forEach(function(ta) {
+              ta.addEventListener('input', function() {
+                var was = answeredState[idx];
+                answeredState[idx] = ta.value.trim() !== '';
+                if (answeredState[idx] !== was) updateGrid();
+                scheduleSave();
+              });
+            });
+          });
+
+          // ---- Mobile drawer ----
+          function openDrawer() {
+            document.getElementById('drawer-overlay').style.display = '';
+            document.getElementById('mobile-drawer').style.display = '';
+          }
+          function closeDrawer() {
+            var o = document.getElementById('drawer-overlay');
+            var d = document.getElementById('mobile-drawer');
+            if (o) o.style.display = 'none';
+            if (d) d.style.display = 'none';
+          }
+
+          // ---- Init ----
+          jumpTo(0);
+          `}
         </script>
       `);
     }
