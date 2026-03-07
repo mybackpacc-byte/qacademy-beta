@@ -499,8 +499,26 @@ export async function handleAttemptRequest(ctx) {
       const showWarning = attempt.effective_duration_secs < fullDurationSecs;
       const warningMins = Math.ceil(attempt.effective_duration_secs / 60);
 
+      // Initial answer/flag state arrays (used by inline JS)
+      const initialAnswered = questions.map((q) => {
+        const a = ansMap[q.id];
+        if (!a || a.answer_json === null || a.answer_json === undefined) return false;
+        try {
+          const p = JSON.parse(a.answer_json);
+          if (p === null || p === undefined) return false;
+          if (typeof p === "string") return p.trim() !== "";
+          if (Array.isArray(p)) return p.length > 0;
+          return true;
+        } catch(e) { return false; }
+      });
+      const initialFlagged = questions.map((q) => {
+        const a = ansMap[q.id];
+        return a ? Number(a.is_flagged) === 1 : false;
+      });
+
       // Build individual question card HTML
-      function buildQuestion(q, idx, savedAns) {
+      // showFlagBtn: true for FREE mode, false for SEQUENTIAL
+      function buildQuestion(q, idx, savedAns, showFlagBtn) {
         const opts = optsByQ[q.id] || [];
         const isFlagged = savedAns ? Number(savedAns.is_flagged) : 0;
         let parsed = null;
@@ -537,7 +555,16 @@ export async function handleAttemptRequest(ctx) {
           ? `<span class="muted" style="font-size:12px">${escapeHtml(String(q.marks))} mark${Number(q.marks) !== 1 ? "s" : ""}</span>`
           : "";
 
-        const hidden = isSequential && idx !== currentQIdx;
+        const flagHtml = showFlagBtn ? `
+          <input type="hidden" name="flag[${escapeAttr(q.id)}]" id="flag-${escapeAttr(q.id)}" value="${isFlagged ? "1" : "0"}" />
+          <button type="button" class="flag-btn" data-qid="${escapeAttr(q.id)}" onclick="toggleFlag(this)"
+            style="background:${isFlagged ? "#fff3cd" : "rgba(0,0,0,.06)"};border:1px solid ${isFlagged ? "#ffc107" : "rgba(0,0,0,.12)"};border-radius:8px;padding:5px 10px;cursor:pointer;font-size:12px;font-weight:700">
+            ${isFlagged ? "🚩 Flagged" : "🏳 Flag"}
+          </button>
+        ` : "";
+
+        // FREE: show only first card initially; SEQUENTIAL: show only currentQIdx
+        const hidden = isSequential ? (idx !== currentQIdx) : (idx !== 0);
         return `
           <div class="card question-card" data-idx="${idx}" data-qid="${escapeAttr(q.id)}"
                style="${hidden ? "display:none" : ""}">
@@ -547,11 +574,7 @@ export async function handleAttemptRequest(ctx) {
               </div>
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                 ${marksHtml}
-                <input type="hidden" name="flag[${escapeAttr(q.id)}]" id="flag-${escapeAttr(q.id)}" value="${isFlagged ? "1" : "0"}" />
-                <button type="button" class="flag-btn" data-qid="${escapeAttr(q.id)}" onclick="toggleFlag(this)"
-                  style="background:${isFlagged ? "#fff3cd" : "rgba(0,0,0,.06)"};border:1px solid ${isFlagged ? "#ffc107" : "rgba(0,0,0,.12)"};border-radius:8px;padding:5px 10px;cursor:pointer;font-size:12px;font-weight:700">
-                  ${isFlagged ? "🚩 Flagged" : "🏳 Flag"}
-                </button>
+                ${flagHtml}
               </div>
             </div>
             <div style="font-size:15px;margin-bottom:16px;line-height:1.6">${escapeHtml(q.question_text)}</div>
@@ -560,20 +583,69 @@ export async function handleAttemptRequest(ctx) {
         `;
       }
 
-      const questionsHtml = questions.map((q, i) => buildQuestion(q, i, ansMap[q.id])).join("");
+      const questionsHtml = questions.map((q, i) => buildQuestion(q, i, ansMap[q.id], !isSequential)).join("");
 
-      // Sequential nav bar (rendered once, updated by JS)
+      // SEQUENTIAL: forward-only nav; Next becomes Submit on last question
       const seqNavHtml = isSequential ? `
-        <div style="display:flex;gap:10px;justify-content:space-between;align-items:center;margin-top:8px">
-          <button type="button" id="btn-prev" onclick="navTo(currentQ-1)" class="btn3"
-            ${currentQIdx === 0 ? "disabled" : ""}
-            style="${currentQIdx === 0 ? "opacity:.35;cursor:not-allowed" : ""}">← Previous</button>
+        <div style="display:flex;gap:10px;justify-content:flex-end;align-items:center;margin-top:8px">
           <div id="btn-next-wrap">
             ${currentQIdx === totalQ - 1
-              ? `<button type="submit" name="action" value="submit" onclick="return confirm('Are you sure you want to submit? You cannot return to this exam.')" class="btn2" style="padding:10px 20px">Submit Exam</button>`
-              : `<button type="button" id="btn-next" onclick="navTo(currentQ+1)" class="btn2">Next →</button>`
+              ? `<button type="submit" name="action" value="submit" onclick="return confirmSubmit()" class="btn2" style="padding:10px 20px">Submit Exam</button>`
+              : `<button type="button" id="btn-next" onclick="navTo(currentQ+1)" class="btn2">Next &#x2192;</button>`
             }
           </div>
+        </div>
+      ` : "";
+
+      // FREE: two-column desktop layout + sticky sidebar grid + mobile drawer
+      const freeMainHtml = !isSequential ? `
+        <div class="exam-layout">
+          <div class="exam-main">
+            ${questionsHtml}
+            <div style="display:flex;gap:10px;justify-content:space-between;align-items:center;margin-top:8px">
+              <button type="button" id="btn-prev" onclick="freeNav(-1)" class="btn3"
+                style="opacity:.35;cursor:not-allowed" disabled>&#x2190; Previous</button>
+              <div id="free-btn-next-wrap">
+                <button type="button" id="btn-next" onclick="freeNav(1)" class="btn2">Next &#x2192;</button>
+              </div>
+            </div>
+            <div style="margin-top:16px;text-align:right">
+              <button type="submit" name="action" value="submit" onclick="return confirmSubmit()"
+                class="btn2" style="padding:12px 24px;font-size:15px">Submit Exam</button>
+            </div>
+          </div>
+          <div class="exam-sidebar">
+            <div class="card" style="padding:14px">
+              <div style="font-weight:700;font-size:13px;margin-bottom:10px">Questions</div>
+              <div style="display:flex;gap:4px;margin-bottom:10px">
+                <button type="button" class="grid-view-btn active" data-view="all" onclick="setView('all')">All</button>
+                <button type="button" class="grid-view-btn" data-view="flagged" onclick="setView('flagged')">&#x1F6A9; Flagged</button>
+                <button type="button" class="grid-view-btn" data-view="unanswered" onclick="setView('unanswered')">&#x25A1; Unanswered</button>
+              </div>
+              <div id="grid-banner" style="display:none;font-size:12px;color:rgba(0,0,0,.55);background:#f6f8f7;border-radius:8px;padding:6px 10px;margin-bottom:8px"></div>
+              <div id="question-grid" class="question-grid"></div>
+            </div>
+          </div>
+        </div>
+        <button type="button" id="mobile-grid-btn" onclick="openDrawer()">
+          &#x1F4CB; Questions <span id="mobile-flag-badge" style="display:none"></span>
+        </button>
+        <div id="drawer-overlay" onclick="closeDrawer()"
+          style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:1000"></div>
+        <div id="mobile-drawer"
+          style="display:none;position:fixed;bottom:0;left:0;right:0;background:#fff;border-radius:16px 16px 0 0;padding:16px;z-index:1001;max-height:70vh;overflow-y:auto">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+            <div style="font-weight:700;font-size:14px">Questions</div>
+            <button type="button" onclick="closeDrawer()"
+              style="background:none;border:none;font-size:20px;cursor:pointer;padding:4px;color:rgba(0,0,0,.5)">&#x2715;</button>
+          </div>
+          <div style="display:flex;gap:4px;margin-bottom:10px">
+            <button type="button" class="grid-view-btn active" data-view="all" onclick="setView('all')">All</button>
+            <button type="button" class="grid-view-btn" data-view="flagged" onclick="setView('flagged')">&#x1F6A9; Flagged</button>
+            <button type="button" class="grid-view-btn" data-view="unanswered" onclick="setView('unanswered')">&#x25A1; Unanswered</button>
+          </div>
+          <div id="mob-grid-banner" style="display:none;font-size:12px;color:rgba(0,0,0,.55);background:#f6f8f7;border-radius:8px;padding:6px 10px;margin-bottom:8px"></div>
+          <div id="mob-question-grid" class="question-grid"></div>
         </div>
       ` : "";
 
@@ -587,6 +659,21 @@ export async function handleAttemptRequest(ctx) {
           .save-toast{position:fixed;bottom:20px;right:20px;padding:8px 14px;border-radius:10px;font-size:13px;font-weight:700;display:none;z-index:9999}
           .save-ok{background:#d4f5e9;color:#0b7a75;border:1px solid rgba(11,122,117,.2)}
           .save-err{background:#fff3f3;color:#c00;border:1px solid rgba(255,0,0,.2)}
+          .exam-layout{display:grid;grid-template-columns:1fr 220px;gap:16px;align-items:start}
+          .exam-sidebar{position:sticky;top:16px}
+          .question-grid{display:flex;flex-wrap:wrap;gap:6px}
+          .grid-sq{width:36px;height:36px;border-radius:8px;border:2px solid transparent;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;background:#eaeef0;color:#1f2a28}
+          .grid-sq.sq-answered{background:#d4f5e9;color:#0b7a75}
+          .grid-sq.sq-flagged{background:#fff3cd;color:#c67000}
+          .grid-sq.sq-current{border-color:#0b7a75 !important}
+          .grid-view-btn{background:#eaeef0;color:#1f2a28;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:5px 8px;font-size:11px;font-weight:700;cursor:pointer;flex:1}
+          .grid-view-btn.active{background:#0b7a75;color:#fff;border-color:#0b7a75}
+          #mobile-grid-btn{position:fixed;bottom:20px;right:20px;background:#0b7a75;color:#fff;border:none;border-radius:24px;padding:10px 16px;font-size:14px;font-weight:700;cursor:pointer;z-index:990;display:none;align-items:center;gap:6px;box-shadow:0 4px 12px rgba(0,0,0,.2)}
+          @media(max-width:768px){
+            .exam-layout{grid-template-columns:1fr}
+            .exam-sidebar{display:none}
+            #mobile-grid-btn{display:flex !important}
+          }
         </style>
 
         <form id="exam-form" method="post" action="/attempt-take">
@@ -596,7 +683,7 @@ export async function handleAttemptRequest(ctx) {
 
           <div class="card q-topbar">
             <div>
-              <div style="font-size:12px;color:rgba(0,0,0,.45);margin-bottom:2px"><a href="/student">← My Exams</a></div>
+              <div style="font-size:12px;color:rgba(0,0,0,.45);margin-bottom:2px"><a href="/student">&#x2190; My Exams</a></div>
               <h1 style="margin:0;font-size:17px">${escapeHtml(exam.title)}</h1>
             </div>
             <div id="exam-timer" class="timer-box">${fmtSecs(timeRemainingSecs)}</div>
@@ -604,137 +691,13 @@ export async function handleAttemptRequest(ctx) {
 
           ${showWarning ? `<div class="warn-banner"><b>Note:</b> This exam closes soon. You have <b>${warningMins} minute${warningMins !== 1 ? "s" : ""}</b> available, not the full ${exam.duration_mins} minutes.</div>` : ""}
 
-          ${questionsHtml}
-
-          ${isSequential ? seqNavHtml : `
-            <div style="margin-top:16px;text-align:right">
-              <button type="submit" name="action" value="submit"
-                onclick="return confirm('Are you sure you want to submit? You cannot return to this exam.')"
-                class="btn2" style="padding:12px 24px;font-size:15px">Submit Exam</button>
-            </div>
-          `}
+          ${isSequential ? questionsHtml + seqNavHtml : freeMainHtml}
         </form>
 
-        <div id="save-toast" class="save-toast save-ok">Saved ✓</div>
+        <div id="save-toast" class="save-toast save-ok">Saved &#x2713;</div>
 
         <script>
-          // ---- Timer ----
-          var secsLeft = ${Math.round(timeRemainingSecs)};
-          var timerEl = document.getElementById('exam-timer');
-
-          function fmtTime(s) {
-            s = Math.max(0, s);
-            var h = Math.floor(s / 3600);
-            var m = Math.floor((s % 3600) / 60);
-            var sec = s % 60;
-            function pad(n) { return String(n).padStart(2, '0'); }
-            if (h > 0) return h + ':' + pad(m) + ':' + pad(sec);
-            return m + ':' + pad(sec);
-          }
-
-          function setTimerClass(s) {
-            timerEl.className = 'timer-box';
-            if (s <= 60) timerEl.classList.add('danger');
-            else if (s <= 300) timerEl.classList.add('warn');
-          }
-
-          timerEl.textContent = fmtTime(secsLeft);
-          setTimerClass(secsLeft);
-
-          var timerInterval = setInterval(function() {
-            secsLeft--;
-            timerEl.textContent = fmtTime(secsLeft);
-            setTimerClass(secsLeft);
-            if (secsLeft <= 0) {
-              clearInterval(timerInterval);
-              document.getElementById('auto-field').value = '1';
-              var form = document.getElementById('exam-form');
-              var inp = document.createElement('input');
-              inp.type = 'hidden'; inp.name = 'action'; inp.value = 'submit';
-              form.appendChild(inp);
-              form.submit();
-            }
-          }, 1000);
-
-          // ---- Auto-save every 30s ----
-          var saveTimer = null;
-          function scheduleSave() {
-            clearTimeout(saveTimer);
-            saveTimer = setTimeout(doSave, 30000);
-          }
-
-          async function doSave() {
-            var toast = document.getElementById('save-toast');
-            try {
-              var data = new FormData(document.getElementById('exam-form'));
-              data.set('action', 'save');
-              var res = await fetch('/attempt-take', { method: 'POST', body: data });
-              var json = await res.json();
-              if (json.ok) {
-                toast.className = 'save-toast save-ok';
-                toast.textContent = 'Saved \u2713';
-              } else {
-                toast.className = 'save-toast save-err';
-                toast.textContent = 'Save failed';
-              }
-            } catch(e) {
-              toast.className = 'save-toast save-err';
-              toast.textContent = 'Save failed';
-            }
-            toast.style.display = 'block';
-            setTimeout(function() { toast.style.display = 'none'; }, 2000);
-            scheduleSave();
-          }
-          scheduleSave();
-
-          // ---- Flag toggle ----
-          function toggleFlag(btn) {
-            var qid = btn.dataset.qid;
-            var hidden = document.getElementById('flag-' + qid);
-            var wasFlagged = hidden.value === '1';
-            hidden.value = wasFlagged ? '0' : '1';
-            if (!wasFlagged) {
-              btn.style.background = '#fff3cd';
-              btn.style.borderColor = '#ffc107';
-              btn.textContent = '\uD83D\uDEA9 Flagged';
-            } else {
-              btn.style.background = 'rgba(0,0,0,.06)';
-              btn.style.borderColor = 'rgba(0,0,0,.12)';
-              btn.textContent = '\uD83C\uDFF3 Flag';
-            }
-          }
-
-          ${isSequential ? `
-          // ---- Sequential navigation ----
-          var currentQ = ${currentQIdx};
-          var totalQ = ${totalQ};
-
-          function navTo(idx) {
-            if (idx < 0 || idx >= totalQ) return;
-            document.querySelectorAll('.question-card').forEach(function(el) {
-              el.style.display = parseInt(el.dataset.idx) === idx ? '' : 'none';
-            });
-            currentQ = idx;
-            document.getElementById('seq-q').value = idx;
-            window.scrollTo(0, 0);
-            // Update prev button
-            var prev = document.getElementById('btn-prev');
-            if (prev) {
-              prev.disabled = idx === 0;
-              prev.style.opacity = idx === 0 ? '.35' : '1';
-              prev.style.cursor = idx === 0 ? 'not-allowed' : '';
-            }
-            // Update next/submit wrap
-            var wrap = document.getElementById('btn-next-wrap');
-            if (wrap) {
-              if (idx === totalQ - 1) {
-                wrap.innerHTML = '<button type="submit" name="action" value="submit" onclick="return confirm(\\'Are you sure you want to submit? You cannot return to this exam.\\')" class="btn2" style="padding:10px 20px">Submit Exam</button>';
-              } else {
-                wrap.innerHTML = '<button type="button" id="btn-next" onclick="navTo(currentQ+1)" class="btn2">Next \u2192</button>';
-              }
-            }
-          }
-          ` : ""}
+          // JS_PLACEHOLDER
         </script>
       `);
     }
