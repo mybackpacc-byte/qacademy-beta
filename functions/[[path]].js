@@ -5,10 +5,20 @@
 import { handleAppRequest } from "./app.js";
 import { handleExamRequest } from "./exams.js";
 import { handleQuestionBankRequest } from "./question-bank.js";
+import { handleAttemptRequest } from "./attempts.js";
 
 export async function onRequest(ctx) {
   const url = new URL(ctx.request.url);
   const path = url.pathname;
+
+  // Attempt (exam taking engine) routes
+  if (
+    path === "/attempt-start" ||
+    path === "/attempt-take" ||
+    path === "/attempt-complete"
+  ) {
+    return handleAttemptRequest(ctx);
+  }
 
   // Question bank routes
   if (
