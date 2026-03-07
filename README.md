@@ -1,5 +1,3 @@
-
-
 # QAcademy Beta — Project Summary
 *This document is for Claude's Project Knowledge. It summarises everything built so far, the tech stack, decisions made, and what comes next.*
 
@@ -20,7 +18,7 @@ A **multi-tenant exam taking platform for schools.**
 - **Role:** Product Manager — no coding background
 - **Approach:** Claude writes all the code, user describes features and tests them
 - **Pace:** Learning as we go — explanations needed alongside code
-- **Environment:** Everything done in the browser — GitHub website for code, Cloudflare dashboard for database
+- **Environment:** Claude Desktop (Claude Code) connected to local GitHub repo + browser Claude.ai for planning
 
 ---
 
@@ -33,14 +31,15 @@ A **multi-tenant exam taking platform for schools.**
 | Database | Cloudflare D1 (SQLite) |
 | Authentication | Custom built |
 | Code Repository | GitHub |
-| Database Management | Cloudflare D1 Query Pane |
+| Database Management | Wrangler CLI (via Claude Desktop) |
 
 ### Important Notes On Environment
-- User works **entirely in the browser** — no terminal
-- All code edited directly on **GitHub website**
-- Database tables created using **Cloudflare D1 query pane**
-- Keep all instructions **browser-friendly**
-- Claude cannot directly read from or push to GitHub repo
+- Local repo is at `C:\Users\confi\qacademy-beta` on Windows
+- Claude Desktop (Claude Code) is connected to the local repo and can run wrangler commands directly
+- Always run `git pull` at the start of a Claude Desktop session if GitHub was edited directly
+- Claude Desktop handles all DB changes via `wrangler d1 execute beta_db --remote`
+- No more manual query pane needed for schema changes
+- Browser Claude.ai is used for planning, reviewing, and generating summaries
 
 ---
 
@@ -54,7 +53,7 @@ functions/
   question-bank.js  → Question bank routes
 
 db/
-  schema.sql        → Reference schema (not auto-run)
+  schema.sql        → Reference schema — run once in D1 for a fresh clone
 
 wrangler.toml       → Cloudflare config
 ```
@@ -110,13 +109,15 @@ everything else                         → app.js
 ### Core tables
 1. `tenants` — schools
 2. `users` — all people
-3. `sessions` — login sessions
+3. `sessions` — login sessions (includes `active_tenant_id`)
 4. `memberships` — user ↔ school ↔ role
 5. `courses` — subjects within a school
 6. `course_teachers` — teacher ↔ course
 7. `enrollments` — student ↔ course
 8. `join_codes` — invite codes
 9. `join_requests` — pending approvals
+17. `classes` — class groups within a school
+18. `class_students` — student ↔ class link
 
 ### Exam tables
 10. `exams` — exam metadata + all settings
@@ -124,28 +125,33 @@ everything else                         → app.js
 12. `exam_custom_fields` — custom fields per exam
 13. `exam_questions` — questions per exam
 14. `exam_question_options` — options per question (column: `question_id`)
+19. `exam_access` — students/users explicitly granted access to an exam
 
 ### Question bank tables
 15. `question_bank` — master question library
-16. `question_bank_options` — options for bank questions (column: `bank_question_id` ⚠️ NOT question_id)
+16. `question_bank_options` — options for bank questions (column: `bank_question_id` ⚠️ NOT `question_id`)
 
-### ALTER TABLE run
-```sql
-ALTER TABLE exam_questions ADD COLUMN bank_question_id TEXT;
-```
+### Dev / Utility tables
+20. `progress_log` — development log, one entry per session (category, title, description, estimated_mins)
 
 ### ⚠️ Important column name difference
 `exam_question_options` uses `question_id` to link to its question.
 `question_bank_options` uses `bank_question_id` to link to its question.
 These are DIFFERENT — all SQL must use the correct column name for each table.
 
+### Schema management
+- `db/schema.sql` is the single source of truth — fully verified against live D1 on 2026-03-07
+- For a fresh clone: paste the entire `schema.sql` into D1 query pane and run — no ALTER TABLEs needed
+- For an existing DB: use `wrangler d1 execute beta_db --remote --command "ALTER TABLE ..."` via Claude Desktop
+- All historical ALTER TABLEs are documented at the bottom of `schema.sql` for reference
+
 ---
 
 ## 🏗️ Dashboards Built
 
 ### System Admin (`/sys`) — COMPLETE
-### School Admin (`/school`) — COMPLETE
-### Teacher (`/teacher`) — COMPLETE (with exam builder + question bank link)
+### School Admin (`/school`) — COMPLETE (including Class management)
+### Teacher (`/teacher`) — COMPLETE (with exam builder + question bank)
 ### Student (`/student`) — SHELL ONLY
 
 ---
@@ -154,7 +160,7 @@ These are DIFFERENT — all SQL must use the correct column name for each table.
 
 ---
 
-## 📐 Exam Builder — COMPLETE (Settings + Questions panes)
+## 📐 Exam Builder — COMPLETE
 
 ### Settings Pane — COMPLETE
 All fields: title, description, duration, max attempts, schedule, late policy, password, shuffle, navigation mode, results release, score display, pass mark, grade bands, custom fields.
@@ -168,7 +174,18 @@ All fields: title, description, duration, max attempts, schedule, late policy, p
 - Questions added inline are auto-saved to bank as PERSONAL
 - Badge shows "📚 From bank" on questions linked to the bank
 
-### Publish / Access / Results panes — STUB (coming soon)
+### Publish Pane — COMPLETE
+- Publish exam (locks questions and settings)
+- Close exam
+- Release results
+- IMMEDIATE policy sets `results_published_at` on publish
+- AFTER_CLOSE policy sets `results_published_at` on close
+
+### Access Pane — COMPLETE
+- Assign students to an exam by class, by course, or individually
+- Uses `exam_access` table
+
+### Results Pane — STUB (coming soon)
 
 ---
 
@@ -206,23 +223,20 @@ All fields: title, description, duration, max attempts, schedule, late policy, p
 
 ## ⏳ What Comes Next (In Order)
 
-### Remaining Exam Builder panes
-- [ ] Publish pane — publish exam, close exam, release results
-- [ ] Access pane — assign classes/students to exam
-- [ ] Results pane — view submissions, grades, release to students
-
 ### Phase 4 — Exam Taking Engine
-- [ ] Student sees available exams on dashboard
+- [ ] New tables needed: `exam_submissions`, `exam_answers`
+- [ ] Student sees available exams on their dashboard
+- [ ] Exam password check before starting
+- [ ] Custom fields collected before exam starts
 - [ ] Timed exam with countdown timer
 - [ ] Auto-save answers every 30 seconds
 - [ ] Auto-submit on time expiry
 - [ ] One attempt at a time enforcement
-- [ ] Custom fields collected before exam starts
-- [ ] Exam password check before starting
 
 ### Phase 5 — Grading & Results
 - [ ] Auto-grade MCQ and True/False
 - [ ] Teacher manually grades Short Answer and Essay
+- [ ] Results pane — view submissions, grades
 - [ ] Publish results to students
 - [ ] Student review mode (if allow_review enabled)
 
@@ -239,14 +253,17 @@ All fields: title, description, duration, max attempts, schedule, late policy, p
 
 - **Modular file structure** — split into shared.js, app.js, exams.js, question-bank.js
 - **No third party auth** — custom built
-- **Browser only workflow** — no terminal
 - **SQLite via D1** — TEXT for IDs and timestamps
 - **PBKDF2** passwords, 40,000 iterations, pepper from `env.APP_SECRET`
 - **Tenant isolation** — every query includes `tenant_id`
-- **Status fields** uppercase: `DRAFT`, `PUBLISHED`, `ACTIVE` etc.
+- **Status fields** uppercase: `DRAFT`, `PUBLISHED`, `ACTIVE`, `CLOSED` etc.
 - **Delete-and-reinsert** pattern for repeating rows (grade bands, custom fields, options)
 - **Question bank sync rule**: DRAFT exam = sync to bank; PUBLISHED exam = frozen copy
 - **Visibility**: PERSONAL (teacher only) or SCHOOL (all teachers in tenant)
+- **System Admin stays in `/sys` only** — no access to school content unless given a membership
+- **Two exam access modes**: Structured (course/class based) and Open (password only)
+- **Questions and settings locked once exam is PUBLISHED** — teachers contact support for edits (deferred)
+- **Schema changes**: always update `schema.sql` AND run the wrangler command on live DB — never let them drift
 - When doing a full rewrite of all files, always verify actual D1 column names match code before deploying
 
 ---
@@ -263,69 +280,10 @@ APP_SECRET   → pepper for password hashing (set in Cloudflare Pages settings)
 - `question_bank_options` table uses `bank_question_id` (not `question_id`) — always check actual D1 column names with `PRAGMA table_info(table_name)` before writing SQL
 - When rewriting files, the safest approach is to rewrite ALL five files at once to guarantee they are in sync
 - Cloudflare D1 does not support `pragma_table_info` in a JOIN or `WHERE m.type = 'table'` — use `PRAGMA table_info(table_name)` directly, one table at a time
+- Duplicate add-from-bank bug fixed — check for existing `bank_question_id` before inserting
+- `ends_at` past date edge case fixed in Publish pane
+- IMMEDIATE policy sets `results_published_at` on publish; AFTER_CLOSE sets it on close
 
 ---
-*Last updated: Question bank fully working. All five files in sync. Next session: Publish pane, then exam taking engine.*
 
-Changes to make:
-1. Update "Important Notes On Environment" — add:
-
-Claude Code Desktop now installed and connected to GitHub repo
-git pull before each Claude Code session if GitHub was edited directly
-
-2. Update Dashboards Built section:
-
-School Admin (/school) → add "including Class management"
-Publish pane → change from STUB to COMPLETE
-
-3. Update Database Tables — add:
-
-17. classes — class groups within a school
-18. class_students — student ↔ class link
-ALTER TABLE exams ADD COLUMN closed_at TEXT;
-
-4. Update What Comes Next:
-
-Publish pane → ✅ COMPLETE
-Access pane → still next
-Add Classes → ✅ COMPLETE (move out of next steps)
-
-5. Add to Important Decisions:
-
-System Admin stays in /sys only — no access to school content unless given a membership
-Two exam access modes: Structured (course/class based) and Open (password only)
-Questions and settings locked once exam is PUBLISHED
-System Admin can edit published questions in future (deferred — teachers contact support)
-
-6. Update Bugs Fixed & Lessons Learned — add:
-
-Duplicate add-from-bank bug fixed — check for existing bank_question_id before inserting
-ends_at past date edge case fixed in Publish pane
-IMMEDIATE policy sets results_published_at on publish; AFTER_CLOSE sets it on close
-
-1. Update Exam Builder section:
-
-Access pane → ✅ COMPLETE
-
-2. Add to Database Tables:
-
-19. exam_access — explicit per-exam access list (id, exam_id, user_id, added_by, created_at)
-
-3. Add to Important Decisions:
-
-Exams belong to a course for organisational purposes only — course is not an access gate
-Access is determined purely by the exam_access table
-Teachers build the access list per exam — by class, by course enrollment (shortcut), or individually
-A student does NOT need to be enrolled in the course to take an exam — teacher controls access explicitly
-"Add from course enrollment" in Access pane is a shortcut, not a requirement
-
-4. Update What Comes Next:
-
-Access pane → ✅ COMPLETE
-Exam taking engine → next
-
-5. Update last line:
-*Last updated: Access pane complete. Design clarified — access is explicit via exam_access table, not tied to course enrollment. Next: Exam taking engine.*
-
-7. Update last line:
-*Last updated: Publish pane complete. Classes built. Next: Access pane, then exam taking engine.*
+*Last updated: 2026-03-07. Schema fully verified and cleaned up. Wrangler installed — Claude Desktop now manages all DB changes. Access pane complete. Next: Exam Taking Engine (Phase 4).*
