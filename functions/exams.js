@@ -439,6 +439,7 @@ export async function handleExamRequest(ctx) {
           .badge-draft{background:#f0f0f0;color:#555}
           .badge-published{background:#d4f5e9;color:#0b7a75}
           .badge-closed{background:#ffe8e8;color:#c00}
+          #pane-publish button:disabled{opacity:0.45;cursor:not-allowed}
         </style>
 
         <div class="card" style="margin-bottom:0;border-radius:14px 14px 0 0">
@@ -681,11 +682,19 @@ export async function handleExamRequest(ctx) {
             <table style="width:100%;font-size:14px;border-collapse:collapse">
               <tr>
                 <td style="padding:6px 0;color:rgba(0,0,0,.45);width:160px">Questions</td>
-                <td style="padding:6px 0;font-weight:600">${questions.length}</td>
+                <td style="padding:6px 0;font-weight:600">${questions.length === 0 ? `<span style="color:#856404">0 ⚠️</span>` : questions.length}</td>
               </tr>
               <tr>
                 <td style="padding:6px 0;color:rgba(0,0,0,.45)">Total marks</td>
                 <td style="padding:6px 0;font-weight:600">${totalMarks}</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0;color:rgba(0,0,0,.45)">Duration</td>
+                <td style="padding:6px 0">${escapeHtml(String(exam.duration_mins || 60))} mins</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0;color:rgba(0,0,0,.45)">Max attempts</td>
+                <td style="padding:6px 0">${escapeHtml(String(exam.max_attempts || 1))}</td>
               </tr>
               <tr>
                 <td style="padding:6px 0;color:rgba(0,0,0,.45)">Opens at</td>
@@ -696,6 +705,14 @@ export async function handleExamRequest(ctx) {
                 <td style="padding:6px 0">${exam.ends_at ? escapeHtml(fmtISO(exam.ends_at)) : '<span class="muted">Not set</span>'}</td>
               </tr>
               <tr>
+                <td style="padding:6px 0;color:rgba(0,0,0,.45)">Late submission</td>
+                <td style="padding:6px 0">${exam.late_submission_policy ? escapeHtml(exam.late_submission_policy) : '<span class="muted">Not set</span>'}</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0;color:rgba(0,0,0,.45)">Exam password</td>
+                <td style="padding:6px 0">${exam.exam_password ? "Set ✓" : '<span class="muted">Not set</span>'}</td>
+              </tr>
+              <tr>
                 <td style="padding:6px 0;color:rgba(0,0,0,.45)">Pass mark</td>
                 <td style="padding:6px 0">${exam.pass_mark_percent != null ? escapeHtml(String(exam.pass_mark_percent)) + "%" : '<span class="muted">Not set</span>'}</td>
               </tr>
@@ -703,12 +720,44 @@ export async function handleExamRequest(ctx) {
                 <td style="padding:6px 0;color:rgba(0,0,0,.45)">Results policy</td>
                 <td style="padding:6px 0">${escapeHtml(exam.results_release_policy || "MANUAL")}</td>
               </tr>
+              <tr>
+                <td style="padding:6px 0;color:rgba(0,0,0,.45)">Score display</td>
+                <td style="padding:6px 0">${escapeHtml(exam.score_display || "BOTH")}</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0;color:rgba(0,0,0,.45)">Shuffle questions</td>
+                <td style="padding:6px 0">${exam.shuffle_questions ? "Yes" : "No"}</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0;color:rgba(0,0,0,.45)">Shuffle options</td>
+                <td style="padding:6px 0">${exam.shuffle_options ? "Yes" : "No"}</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0;color:rgba(0,0,0,.45)">Show marks during</td>
+                <td style="padding:6px 0">${exam.show_marks_during ? "Yes" : "No"}</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0;color:rgba(0,0,0,.45)">Allow review</td>
+                <td style="padding:6px 0">${exam.allow_review ? "Yes" : "No"}</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0;color:rgba(0,0,0,.45)">Navigation mode</td>
+                <td style="padding:6px 0">${escapeHtml(exam.navigation_mode || "FREE")}</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0;color:rgba(0,0,0,.45)">Grade bands</td>
+                <td style="padding:6px 0">${bands.length > 0 ? `${bands.length} band${bands.length !== 1 ? "s" : ""}` : '<span class="muted">None</span>'}</td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0;color:rgba(0,0,0,.45)">Custom fields</td>
+                <td style="padding:6px 0">${customFields.length > 0 ? `${customFields.length} field${customFields.length !== 1 ? "s" : ""}` : '<span class="muted">None</span>'}</td>
+              </tr>
             </table>
             ${exam.status === "DRAFT" && questions.length === 0 ? `
               <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:10px 14px;margin-top:14px;color:#856404;font-size:13px">
                 ⚠️ Add at least one question before publishing.
               </div>
-              <button class="btn2" type="button" disabled style="margin-top:14px">Publish Exam</button>
+              <button class="btn2" type="button" disabled style="margin-top:14px">🔒 Publish Exam</button>
             ` : exam.status === "DRAFT" ? `
               <form method="post" action="/exam-publish" style="margin-top:14px">
                 <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
@@ -718,22 +767,31 @@ export async function handleExamRequest(ctx) {
               <div style="background:#d4f5e9;border:1px solid #0b7a75;border-radius:8px;padding:10px 14px;margin-top:14px;color:#0b7a75;font-size:13px">
                 ✅ This exam has been published${exam.published_at ? " on " + escapeHtml(fmtISO(exam.published_at)) : ""}.
               </div>
-              <button class="btn2" type="button" disabled style="margin-top:14px">Publish Exam</button>
+              <button class="btn2" type="button" disabled style="margin-top:14px">🔒 Publish Exam</button>
             `}
           </div>
 
           <!-- Section 2: Close Exam (always visible) -->
           <div class="card">
             <div class="section-title">Close Exam</div>
+            ${exam.status === "CLOSED" ? `
+              <p style="font-size:13px;color:rgba(0,0,0,.45);margin:0 0 10px">📅 Closed on: ${exam.closed_at ? escapeHtml(fmtISO(exam.closed_at)) : "date not recorded"}</p>
+            ` : exam.status === "PUBLISHED" && exam.ends_at && new Date(exam.ends_at) > new Date() ? `
+              <p style="font-size:13px;color:rgba(0,0,0,.45);margin:0 0 10px">📅 Scheduled to close: ${escapeHtml(fmtISO(exam.ends_at))}</p>
+            ` : exam.status === "PUBLISHED" && exam.ends_at ? `
+              <p style="font-size:13px;color:rgba(0,0,0,.45);margin:0 0 10px">📅 Scheduled close date passed: ${escapeHtml(fmtISO(exam.ends_at))}</p>
+            ` : exam.status === "PUBLISHED" ? `
+              <p style="font-size:13px;color:rgba(0,0,0,.45);margin:0 0 10px">📅 No automatic close date set</p>
+            ` : ""}
             ${exam.status === "DRAFT" ? `
               <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">Publish the exam first.</p>
-              <button class="btn2" type="button" disabled style="background:#c00;border-color:#c00">Close Exam Now</button>
+              <button class="btn2" type="button" disabled style="background:#c00;border-color:#c00">🔒 Close Exam Now</button>
             ` : exam.status === "CLOSED" ? `
               <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">This exam is already closed.</p>
-              <button class="btn2" type="button" disabled style="background:#c00;border-color:#c00">Close Exam Now</button>
+              <button class="btn2" type="button" disabled style="background:#c00;border-color:#c00">🔒 Close Exam Now</button>
             ` : exam.ends_at && new Date(exam.ends_at) > new Date() ? `
               <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">Exam is scheduled to close automatically on <strong>${escapeHtml(fmtISO(exam.ends_at))}</strong>.</p>
-              <button class="btn2" type="button" disabled style="background:#c00;border-color:#c00">Close Exam Now</button>
+              <button class="btn2" type="button" disabled style="background:#c00;border-color:#c00">🔒 Close Exam Now</button>
             ` : `
               ${exam.ends_at ? `
                 <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:10px 14px;margin-bottom:12px;color:#856404;font-size:13px">
@@ -752,20 +810,29 @@ export async function handleExamRequest(ctx) {
           <!-- Section 3: Release Results (always visible) -->
           <div class="card">
             <div class="section-title">Release Results</div>
+            ${exam.results_release_policy === "IMMEDIATE" ? `
+              <p style="font-size:13px;color:rgba(0,0,0,.45);margin:0 0 10px">📅 Auto-releases on publish</p>
+            ` : exam.results_release_policy === "AFTER_CLOSE" ? `
+              <p style="font-size:13px;color:rgba(0,0,0,.45);margin:0 0 10px">📅 Auto-releases when exam closes</p>
+            ` : exam.results_published_at ? `
+              <p style="font-size:13px;color:rgba(0,0,0,.45);margin:0 0 10px">📅 Released on: ${escapeHtml(fmtISO(exam.results_published_at))}</p>
+            ` : `
+              <p style="font-size:13px;color:rgba(0,0,0,.45);margin:0 0 10px">📅 Not yet released</p>
+            `}
             ${exam.status !== "CLOSED" ? `
               <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">Close the exam first before releasing results.</p>
-              <button class="btn2" type="button" disabled>Release Results Now</button>
+              <button class="btn2" type="button" disabled>🔒 Release Results Now</button>
             ` : exam.results_release_policy === "IMMEDIATE" ? `
               <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">Results will release automatically when published (IMMEDIATE policy).</p>
-              <button class="btn2" type="button" disabled>Release Results Now</button>
+              <button class="btn2" type="button" disabled>🔒 Release Results Now</button>
             ` : exam.results_release_policy === "AFTER_CLOSE" ? `
               <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">Results will release automatically when exam closes (AFTER_CLOSE policy).</p>
-              <button class="btn2" type="button" disabled>Release Results Now</button>
+              <button class="btn2" type="button" disabled>🔒 Release Results Now</button>
             ` : exam.results_published_at ? `
               <div style="background:#d4f5e9;border:1px solid #0b7a75;border-radius:8px;padding:10px 14px;color:#0b7a75;font-size:13px">
                 ✅ Results already released on <strong>${escapeHtml(fmtISO(exam.results_published_at))}</strong>.
               </div>
-              <button class="btn2" type="button" disabled style="margin-top:14px">Release Results Now</button>
+              <button class="btn2" type="button" disabled style="margin-top:14px">🔒 Release Results Now</button>
             ` : `
               <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">Results have not been released to students yet.</p>
               <form method="post" action="/exam-release-results">
