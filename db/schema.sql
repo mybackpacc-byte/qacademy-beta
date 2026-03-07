@@ -294,6 +294,22 @@ CREATE TABLE IF NOT EXISTS question_bank_options (
 
 
 -- ============================================================
+-- PROGRESS LOG TABLE
+-- ============================================================
+
+-- 20. progress_log — internal dev/project progress tracking
+CREATE TABLE IF NOT EXISTS progress_log (
+  id              TEXT PRIMARY KEY,
+  log_date        TEXT NOT NULL,
+  category        TEXT NOT NULL,
+  title           TEXT NOT NULL,
+  description     TEXT,
+  estimated_mins  INTEGER,
+  created_at      TEXT NOT NULL
+);
+
+
+-- ============================================================
 -- MIGRATIONS LOG
 -- (for reference only — these were run on the live database
 --  as ALTER TABLE statements. They are already baked into the
