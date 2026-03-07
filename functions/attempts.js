@@ -697,7 +697,313 @@ export async function handleAttemptRequest(ctx) {
         <div id="save-toast" class="save-toast save-ok">Saved &#x2713;</div>
 
         <script>
-          // JS_PLACEHOLDER
+          // ---- Timer ----
+          var secsLeft = ${Math.round(timeRemainingSecs)};
+          var timerEl = document.getElementById('exam-timer');
+
+          function fmtTime(s) {
+            s = Math.max(0, s);
+            var h = Math.floor(s / 3600);
+            var m = Math.floor((s % 3600) / 60);
+            var sec = s % 60;
+            function pad(n) { return String(n).padStart(2, '0'); }
+            if (h > 0) return h + ':' + pad(m) + ':' + pad(sec);
+            return m + ':' + pad(sec);
+          }
+
+          function setTimerClass(s) {
+            timerEl.className = 'timer-box';
+            if (s <= 60) timerEl.classList.add('danger');
+            else if (s <= 300) timerEl.classList.add('warn');
+          }
+
+          timerEl.textContent = fmtTime(secsLeft);
+          setTimerClass(secsLeft);
+
+          var timerInterval = setInterval(function() {
+            secsLeft--;
+            timerEl.textContent = fmtTime(secsLeft);
+            setTimerClass(secsLeft);
+            if (secsLeft <= 0) {
+              clearInterval(timerInterval);
+              document.getElementById('auto-field').value = '1';
+              var form = document.getElementById('exam-form');
+              var inp = document.createElement('input');
+              inp.type = 'hidden'; inp.name = 'action'; inp.value = 'submit';
+              form.appendChild(inp);
+              form.submit();
+            }
+          }, 1000);
+
+          // ---- Auto-save every 30s ----
+          var saveTimer = null;
+          function scheduleSave() {
+            clearTimeout(saveTimer);
+            saveTimer = setTimeout(doSave, 30000);
+          }
+
+          async function doSave() {
+            var toast = document.getElementById('save-toast');
+            try {
+              var data = new FormData(document.getElementById('exam-form'));
+              data.set('action', 'save');
+              var res = await fetch('/attempt-take', { method: 'POST', body: data });
+              var json = await res.json();
+              if (json.ok) {
+                toast.className = 'save-toast save-ok';
+                toast.textContent = 'Saved \u2713';
+              } else {
+                toast.className = 'save-toast save-err';
+                toast.textContent = 'Save failed';
+              }
+            } catch(e) {
+              toast.className = 'save-toast save-err';
+              toast.textContent = 'Save failed';
+            }
+            toast.style.display = 'block';
+            setTimeout(function() { toast.style.display = 'none'; }, 2000);
+            scheduleSave();
+          }
+          scheduleSave();
+
+          // ---- Pre-submit confirm (counts unanswered live) ----
+          var answeredState;
+          function confirmSubmit() {
+            var unanswered = answeredState ? answeredState.filter(function(v) { return !v; }).length : 0;
+            var msg = unanswered > 0
+              ? 'You have ' + unanswered + ' unanswered question' + (unanswered !== 1 ? 's' : '') + '. Are you sure you want to submit? You cannot return to this exam.'
+              : 'Are you sure you want to submit? You cannot return to this exam.';
+            return confirm(msg);
+          }
+
+          ${isSequential ? `
+          // ---- Sequential navigation (forward-only) ----
+          var currentQ = ${currentQIdx};
+          var totalQ = ${totalQ};
+          answeredState = ${JSON.stringify(initialAnswered)};
+
+          document.querySelectorAll('.question-card').forEach(function(card) {
+            var idx = parseInt(card.dataset.idx);
+            card.querySelectorAll('input[type=radio], input[type=checkbox]').forEach(function(inp) {
+              inp.addEventListener('change', function() {
+                var radios = card.querySelectorAll('input[type=radio]');
+                var checks = card.querySelectorAll('input[type=checkbox]');
+                if (radios.length > 0) {
+                  answeredState[idx] = Array.from(radios).some(function(r) { return r.checked; });
+                } else {
+                  answeredState[idx] = Array.from(checks).some(function(c) { return c.checked; });
+                }
+              });
+            });
+            card.querySelectorAll('textarea').forEach(function(ta) {
+              ta.addEventListener('input', function() {
+                answeredState[idx] = ta.value.trim() !== '';
+              });
+            });
+          });
+
+          function navTo(idx) {
+            if (idx < 0 || idx >= totalQ) return;
+            document.querySelectorAll('.question-card').forEach(function(el) {
+              el.style.display = parseInt(el.dataset.idx) === idx ? '' : 'none';
+            });
+            currentQ = idx;
+            document.getElementById('seq-q').value = idx;
+            window.scrollTo(0, 0);
+            var wrap = document.getElementById('btn-next-wrap');
+            if (wrap) {
+              if (idx === totalQ - 1) {
+                wrap.innerHTML = '<button type="submit" name="action" value="submit" onclick="return confirmSubmit()" class="btn2" style="padding:10px 20px">Submit Exam</button>';
+              } else {
+                wrap.innerHTML = '<button type="button" id="btn-next" onclick="navTo(currentQ+1)" class="btn2">Next \u2192</button>';
+              }
+            }
+          }
+          ` : `
+          // ---- FREE mode navigation & grid ----
+          var totalQ = ${totalQ};
+          answeredState = ${JSON.stringify(initialAnswered)};
+          var flaggedState = ${JSON.stringify(initialFlagged)};
+          var currentView = 'all';
+          var currentIdx = 0;
+
+          function getFilteredList() {
+            var list = [];
+            for (var i = 0; i < totalQ; i++) {
+              if (currentView === 'all') list.push(i);
+              else if (currentView === 'flagged' && flaggedState[i]) list.push(i);
+              else if (currentView === 'unanswered' && !answeredState[i]) list.push(i);
+            }
+            return list;
+          }
+
+          function jumpTo(absIdx) {
+            currentIdx = absIdx;
+            document.querySelectorAll('.question-card').forEach(function(el) {
+              el.style.display = parseInt(el.dataset.idx) === absIdx ? '' : 'none';
+            });
+            window.scrollTo(0, 0);
+            updateGrid();
+            updateNavBtns();
+          }
+
+          function freeNav(dir) {
+            var list = getFilteredList();
+            if (list.length === 0) return;
+            var pos = list.indexOf(currentIdx);
+            var newPos = pos + dir;
+            if (newPos < 0 || newPos >= list.length) return;
+            jumpTo(list[newPos]);
+          }
+
+          function updateNavBtns() {
+            var list = getFilteredList();
+            var pos = list.indexOf(currentIdx);
+            var prevBtn = document.getElementById('btn-prev');
+            var nextWrap = document.getElementById('free-btn-next-wrap');
+            if (prevBtn) {
+              prevBtn.disabled = pos <= 0;
+              prevBtn.style.opacity = pos <= 0 ? '.35' : '1';
+              prevBtn.style.cursor = pos <= 0 ? 'not-allowed' : '';
+            }
+            if (nextWrap) {
+              if (pos >= list.length - 1) {
+                nextWrap.innerHTML = '';
+              } else {
+                nextWrap.innerHTML = '<button type="button" id="btn-next" onclick="freeNav(1)" class="btn2">Next \u2192</button>';
+              }
+            }
+          }
+
+          function setView(view) {
+            currentView = view;
+            document.querySelectorAll('.grid-view-btn').forEach(function(btn) {
+              btn.classList.toggle('active', btn.dataset.view === view);
+            });
+            var bannerText = view === 'flagged' ? 'Showing flagged questions only'
+                           : view === 'unanswered' ? 'Showing unanswered questions only' : '';
+            ['grid-banner', 'mob-grid-banner'].forEach(function(id) {
+              var el = document.getElementById(id);
+              if (!el) return;
+              el.style.display = bannerText ? '' : 'none';
+              el.textContent = bannerText;
+            });
+            var list = getFilteredList();
+            if (list.length > 0) { jumpTo(list[0]); } else { updateGrid(); updateNavBtns(); }
+          }
+
+          function updateGrid() {
+            var list = getFilteredList();
+            ['question-grid', 'mob-question-grid'].forEach(function(gid) {
+              var grid = document.getElementById(gid);
+              if (!grid) return;
+              grid.innerHTML = '';
+              if (list.length === 0) {
+                var msg = currentView === 'flagged' ? 'No flagged questions yet'
+                        : currentView === 'unanswered' ? 'All questions answered \u2713' : '';
+                if (msg) {
+                  var p = document.createElement('p');
+                  p.style.cssText = 'font-size:13px;color:rgba(0,0,0,.5);margin:0;padding:4px 0';
+                  p.textContent = msg;
+                  grid.appendChild(p);
+                }
+                return;
+              }
+              list.forEach(function(absIdx) {
+                var btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'grid-sq';
+                btn.textContent = absIdx + 1;
+                (function(ai) { btn.onclick = function() { jumpTo(ai); closeDrawer(); }; })(absIdx);
+                if (flaggedState[absIdx]) { btn.classList.add('sq-flagged'); }
+                else if (answeredState[absIdx]) { btn.classList.add('sq-answered'); }
+                if (absIdx === currentIdx) btn.classList.add('sq-current');
+                grid.appendChild(btn);
+              });
+            });
+            var flagCount = flaggedState.filter(Boolean).length;
+            var badge = document.getElementById('mobile-flag-badge');
+            if (badge) {
+              if (flagCount > 0) { badge.textContent = '\uD83D\uDEA9' + flagCount; badge.style.display = ''; }
+              else { badge.style.display = 'none'; }
+            }
+          }
+
+          // ---- Flag toggle (FREE mode) ----
+          function toggleFlag(btn) {
+            var qid = btn.dataset.qid;
+            var hidden = document.getElementById('flag-' + qid);
+            var wasFlagged = hidden.value === '1';
+            hidden.value = wasFlagged ? '0' : '1';
+            if (!wasFlagged) {
+              btn.style.background = '#fff3cd'; btn.style.borderColor = '#ffc107';
+              btn.textContent = '\uD83D\uDEA9 Flagged';
+              flaggedState[currentIdx] = true;
+            } else {
+              btn.style.background = 'rgba(0,0,0,.06)'; btn.style.borderColor = 'rgba(0,0,0,.12)';
+              btn.textContent = '\uD83C\uDFF3 Flag';
+              flaggedState[currentIdx] = false;
+            }
+            updateGrid();
+            if (currentView === 'flagged' && !flaggedState[currentIdx]) {
+              var list = getFilteredList();
+              if (list.length > 0) jumpTo(list[0]); else { updateGrid(); updateNavBtns(); }
+            }
+          }
+
+          // ---- Answer change listeners ----
+          document.querySelectorAll('.question-card').forEach(function(card) {
+            var idx = parseInt(card.dataset.idx);
+            function advanceUnanswered() {
+              var remaining = [];
+              for (var i = 0; i < totalQ; i++) { if (!answeredState[i]) remaining.push(i); }
+              if (remaining.length === 0) { updateGrid(); updateNavBtns(); return; }
+              var after = remaining.filter(function(i) { return i > currentIdx; });
+              var target = after.length > 0 ? after[0] : remaining[0];
+              setTimeout(function() { jumpTo(target); }, 300);
+            }
+            card.querySelectorAll('input[type=radio]').forEach(function(inp) {
+              inp.addEventListener('change', function() {
+                answeredState[idx] = true;
+                updateGrid();
+                if (currentView === 'unanswered') advanceUnanswered();
+                scheduleSave();
+              });
+            });
+            card.querySelectorAll('input[type=checkbox]').forEach(function(inp) {
+              inp.addEventListener('change', function() {
+                var checks = card.querySelectorAll('input[type=checkbox]');
+                answeredState[idx] = Array.from(checks).some(function(c) { return c.checked; });
+                updateGrid();
+                if (currentView === 'unanswered' && answeredState[idx]) advanceUnanswered();
+                scheduleSave();
+              });
+            });
+            card.querySelectorAll('textarea').forEach(function(ta) {
+              ta.addEventListener('input', function() {
+                var was = answeredState[idx];
+                answeredState[idx] = ta.value.trim() !== '';
+                if (answeredState[idx] !== was) updateGrid();
+                scheduleSave();
+              });
+            });
+          });
+
+          // ---- Mobile drawer ----
+          function openDrawer() {
+            document.getElementById('drawer-overlay').style.display = '';
+            document.getElementById('mobile-drawer').style.display = '';
+          }
+          function closeDrawer() {
+            var o = document.getElementById('drawer-overlay');
+            var d = document.getElementById('mobile-drawer');
+            if (o) o.style.display = 'none';
+            if (d) d.style.display = 'none';
+          }
+
+          // ---- Init ----
+          jumpTo(0);
+          `}
         </script>
       `);
     }
