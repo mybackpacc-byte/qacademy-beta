@@ -704,57 +704,68 @@ export async function handleExamRequest(ctx) {
                 <td style="padding:6px 0">${escapeHtml(exam.results_release_policy || "MANUAL")}</td>
               </tr>
             </table>
-            ${questions.length === 0 ? `
+            ${exam.status === "DRAFT" && questions.length === 0 ? `
               <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:10px 14px;margin-top:14px;color:#856404;font-size:13px">
                 ⚠️ Add at least one question before publishing.
               </div>
-            ` : ""}
-            ${exam.status === "DRAFT" ? `
+              <button class="btn2" type="button" disabled style="margin-top:14px">Publish Exam</button>
+            ` : exam.status === "DRAFT" ? `
               <form method="post" action="/exam-publish" style="margin-top:14px">
                 <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
-                <button class="btn2" type="submit"${questions.length === 0 ? " disabled" : ""}>Publish Exam</button>
+                <button class="btn2" type="submit">Publish Exam</button>
               </form>
             ` : `
               <div style="background:#d4f5e9;border:1px solid #0b7a75;border-radius:8px;padding:10px 14px;margin-top:14px;color:#0b7a75;font-size:13px">
                 ✅ This exam has been published${exam.published_at ? " on " + escapeHtml(fmtISO(exam.published_at)) : ""}.
               </div>
+              <button class="btn2" type="button" disabled style="margin-top:14px">Publish Exam</button>
             `}
           </div>
 
-          <!-- Section 2: Close Exam (PUBLISHED or CLOSED only) -->
-          ${exam.status === "PUBLISHED" || exam.status === "CLOSED" ? `
+          <!-- Section 2: Close Exam (always visible) -->
           <div class="card">
             <div class="section-title">Close Exam</div>
-            ${exam.status === "CLOSED" ? `
-              <p style="font-size:14px;margin:0">This exam is closed.</p>
-            ` : exam.ends_at ? (new Date(exam.ends_at) > new Date() ? `
-              <p style="font-size:14px;margin:0">This exam will close automatically on <strong>${escapeHtml(fmtISO(exam.ends_at))}</strong>.</p>
+            ${exam.status === "DRAFT" ? `
+              <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">Publish the exam first.</p>
+              <button class="btn2" type="button" disabled style="background:#c00;border-color:#c00">Close Exam Now</button>
+            ` : exam.status === "CLOSED" ? `
+              <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">This exam is already closed.</p>
+              <button class="btn2" type="button" disabled style="background:#c00;border-color:#c00">Close Exam Now</button>
+            ` : exam.ends_at && new Date(exam.ends_at) > new Date() ? `
+              <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">Exam is scheduled to close automatically on <strong>${escapeHtml(fmtISO(exam.ends_at))}</strong>.</p>
+              <button class="btn2" type="button" disabled style="background:#c00;border-color:#c00">Close Exam Now</button>
             ` : `
-              <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:10px 14px;margin-bottom:12px;color:#856404;font-size:13px">
-                ⚠️ Your scheduled close date has passed.
-              </div>
-              <form method="post" action="/exam-close">
-                <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
-                <button class="btn2" type="submit" style="background:#c00;border-color:#c00" onclick="return confirm('Close this exam now? Students will no longer be able to start it.')">Close Exam Now</button>
-              </form>
-            `) : `
-              <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">No automatic close date is set. You can close it manually when ready.</p>
+              ${exam.ends_at ? `
+                <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:10px 14px;margin-bottom:12px;color:#856404;font-size:13px">
+                  ⚠️ Your scheduled close date has passed.
+                </div>
+              ` : `
+                <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">No automatic close date is set. You can close it manually when ready.</p>
+              `}
               <form method="post" action="/exam-close">
                 <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
                 <button class="btn2" type="submit" style="background:#c00;border-color:#c00" onclick="return confirm('Close this exam now? Students will no longer be able to start it.')">Close Exam Now</button>
               </form>
             `}
           </div>
-          ` : ""}
 
-          <!-- Section 3: Release Results (CLOSED only) -->
-          ${exam.status === "CLOSED" ? `
+          <!-- Section 3: Release Results (always visible) -->
           <div class="card">
             <div class="section-title">Release Results</div>
-            ${exam.results_release_policy === "IMMEDIATE" || exam.results_release_policy === "AFTER_CLOSE" ? `
-              <p style="font-size:14px;margin:0">Results are released automatically per policy (<strong>${escapeHtml(exam.results_release_policy)}</strong>).</p>
+            ${exam.status !== "CLOSED" ? `
+              <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">Close the exam first before releasing results.</p>
+              <button class="btn2" type="button" disabled>Release Results Now</button>
+            ` : exam.results_release_policy === "IMMEDIATE" ? `
+              <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">Results will release automatically when published (IMMEDIATE policy).</p>
+              <button class="btn2" type="button" disabled>Release Results Now</button>
+            ` : exam.results_release_policy === "AFTER_CLOSE" ? `
+              <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">Results will release automatically when exam closes (AFTER_CLOSE policy).</p>
+              <button class="btn2" type="button" disabled>Release Results Now</button>
             ` : exam.results_published_at ? `
-              <p style="font-size:14px;margin:0">Results released on <strong>${escapeHtml(fmtISO(exam.results_published_at))}</strong>.</p>
+              <div style="background:#d4f5e9;border:1px solid #0b7a75;border-radius:8px;padding:10px 14px;color:#0b7a75;font-size:13px">
+                ✅ Results already released on <strong>${escapeHtml(fmtISO(exam.results_published_at))}</strong>.
+              </div>
+              <button class="btn2" type="button" disabled style="margin-top:14px">Release Results Now</button>
             ` : `
               <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">Results have not been released to students yet.</p>
               <form method="post" action="/exam-release-results">
@@ -763,7 +774,6 @@ export async function handleExamRequest(ctx) {
               </form>
             `}
           </div>
-          ` : ""}
 
         </div>
 
