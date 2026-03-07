@@ -1740,7 +1740,7 @@ export async function handleAppRequest(ctx) {
           } else if (attemptsRemaining > 0) {
             badgeClass = "badge-open";
             badgeLabel = "Open";
-            actionHtml = `<a href="/exam-start?exam_id=${escapeAttr(exam.exam_id)}" class="btn2" style="display:inline-block;text-decoration:none;padding:8px 16px">Start Exam</a>`;
+            actionHtml = `<a href="/attempt-start?exam_id=${escapeAttr(exam.exam_id)}" class="btn2" style="display:inline-block;text-decoration:none;padding:8px 16px">Start Exam</a>`;
           } else {
             badgeClass = "badge-completed";
             badgeLabel = "Completed";
