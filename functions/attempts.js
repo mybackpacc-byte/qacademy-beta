@@ -4,7 +4,7 @@
 // GET/POST /attempt-take   — the live exam screen
 // GET      /attempt-complete — post-submission screen
 
-import { createHelpers } from "./shared.js";
+import { createHelpers, recalcAttempt } from "./shared.js";
 
 export async function handleAttemptRequest(ctx) {
   try {
@@ -204,36 +204,8 @@ export async function handleAttemptRequest(ctx) {
         );
       }
 
-      // Step 3 — Calculate totals
-      const gradedAnswers = await all(
-        `SELECT score_awarded FROM exam_answers WHERE attempt_id=?`,
-        [attemptId]
-      );
-      const scoreRaw = gradedAnswers.reduce((sum, a) =>
-        sum + (a.score_awarded !== null && a.score_awarded !== undefined ? Number(a.score_awarded) : 0), 0);
-      const scoreTotal = questions.reduce((sum, q) => sum + Number(q.marks), 0);
-      const scorePct = scoreTotal > 0 ? Math.round((scoreRaw / scoreTotal) * 10000) / 100 : 0;
-
-      // Grade band (bands are ordered by min_percent DESC)
-      let grade = null;
-      try {
-        const bands = JSON.parse(attempt.grade_bands_json || "[]");
-        for (const band of bands) {
-          if (scorePct >= Number(band.min_percent)) { grade = band.label; break; }
-        }
-      } catch(e) {}
-
-      // grading_status: FULLY_GRADED if no manual questions, AUTO_GRADED if any need manual review
-      const hasManual = questions.some((q) =>
-        q.question_type === "SHORT_ANSWER" || q.question_type === "ESSAY"
-      );
-      const gradingStatus = hasManual ? "AUTO_GRADED" : "FULLY_GRADED";
-
-      // Step 4 — Write results back to attempt
-      await run(
-        `UPDATE exam_attempts SET score_raw=?, score_total=?, score_pct=?, grade=?, grading_status=?, updated_at=? WHERE id=? AND tenant_id=?`,
-        [scoreRaw, scoreTotal, scorePct, grade, gradingStatus, ts, attemptId, tenantId]
-      );
+      // Steps 3–4 — Recalculate totals, grade, status and persist
+      await recalcAttempt(attemptId, tenantId, env.DB);
     }
 
     // =============================

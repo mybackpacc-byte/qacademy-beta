@@ -2,7 +2,7 @@
 // All exam builder routes
 // Includes: settings, questions, bank picker, add-from-bank
 
-import { createHelpers } from "./shared.js";
+import { createHelpers, recalcAttempt } from "./shared.js";
 
 export async function handleExamRequest(ctx) {
   try {
@@ -422,6 +422,80 @@ export async function handleExamRequest(ctx) {
       const studentOpts = allStudents.map((s) =>
         `<option value="${escapeAttr(s.id)}">${escapeHtml(s.name)} (${escapeHtml(s.email)})</option>`
       ).join("");
+
+      // === Results pane data ===
+      const submittedAttempts = await all(
+        `SELECT ea.id, ea.user_id, u.name AS student_name, ea.attempt_no,
+                ea.grading_status, ea.score_raw, ea.score_total, ea.score_pct,
+                ea.grade, ea.pass_mark_percent, ea.started_at, ea.submitted_at,
+                ea.time_taken_secs, ea.custom_fields_json
+         FROM exam_attempts ea
+         JOIN users u ON u.id = ea.user_id
+         WHERE ea.exam_id=? AND ea.tenant_id=? AND ea.status='SUBMITTED'
+         ORDER BY u.name ASC, ea.attempt_no ASC`,
+        [examId, active.tenant_id]
+      );
+      const inProgressRow = await first(
+        `SELECT COUNT(*) AS c FROM exam_attempts WHERE exam_id=? AND tenant_id=? AND status='IN_PROGRESS'`,
+        [examId, active.tenant_id]
+      );
+      const totalSubmitted = submittedAttempts.length;
+      const inProgressC = Number(inProgressRow?.c || 0);
+      const needsGradingC = submittedAttempts.filter((a) => a.grading_status === "AUTO_GRADED").length;
+      const avgPct = totalSubmitted > 0
+        ? Math.round(submittedAttempts.reduce((s, a) => s + Number(a.score_pct || 0), 0) / totalSubmitted * 10) / 10
+        : null;
+
+      const fmtSecs = (secs) => {
+        if (secs === null || secs === undefined) return "—";
+        const s = Number(secs);
+        const h = Math.floor(s / 3600);
+        const m = Math.floor((s % 3600) / 60);
+        const sec = s % 60;
+        if (h > 0) return `${h}h ${m}m`;
+        if (m > 0) return `${m}m ${sec}s`;
+        return `${sec}s`;
+      };
+
+      const resultRows = submittedAttempts.map((a) => {
+        let cfData = {};
+        try { cfData = JSON.parse(a.custom_fields_json || "{}"); } catch(e) {}
+        const passed = a.pass_mark_percent !== null && a.pass_mark_percent !== undefined && a.score_pct !== null && a.score_pct !== undefined
+          ? Number(a.score_pct) >= Number(a.pass_mark_percent)
+          : null;
+        const statusBadge = a.grading_status === "AUTO_GRADED"
+          ? `<span style="background:#fff3cd;color:#856404;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700">Needs Grading</span>`
+          : `<span style="background:#d4f5e9;color:#0b7a75;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700">Fully Graded</span>`;
+        const passBadge = passed === null ? `<span class="muted">—</span>`
+          : passed
+            ? `<span style="background:#d4f5e9;color:#0b7a75;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700">Pass</span>`
+            : `<span style="background:#ffe8e8;color:#c00;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700">Fail</span>`;
+        return `
+          <tr data-name="${escapeAttr((a.student_name || "").toLowerCase())}"
+              data-grading="${escapeAttr(a.grading_status || "")}"
+              data-pass="${passed === null ? "none" : (passed ? "pass" : "fail")}"
+              data-pct="${a.score_pct !== null && a.score_pct !== undefined ? a.score_pct : ""}"
+              data-attempt="${a.attempt_no || ""}"
+              data-time="${a.time_taken_secs !== null && a.time_taken_secs !== undefined ? a.time_taken_secs : ""}"
+              data-submitted="${escapeAttr(a.submitted_at || "")}">
+            <td>${escapeHtml(a.student_name)}</td>
+            ${customFields.map((cf) => `<td class="muted small">${escapeHtml(cfData[cf.id] || "")}</td>`).join("")}
+            ${Number(exam.max_attempts) > 1 ? `<td class="muted small">${a.attempt_no}</td>` : ""}
+            <td>${statusBadge}</td>
+            <td>${a.score_raw !== null && a.score_raw !== undefined ? `${Number(a.score_raw)} / ${Number(a.score_total)}` : '<span class="muted">—</span>'}</td>
+            <td>${a.score_pct !== null && a.score_pct !== undefined ? `${Number(a.score_pct)}%` : '<span class="muted">—</span>'}</td>
+            ${bands.length > 0 ? `<td>${a.grade ? `<span class="pill" style="font-size:11px">${escapeHtml(a.grade)}</span>` : '<span class="muted">—</span>'}</td>` : ""}
+            ${exam.pass_mark_percent !== null && exam.pass_mark_percent !== undefined ? `<td>${passBadge}</td>` : ""}
+            <td class="muted small">${fmtSecs(a.time_taken_secs)}</td>
+            <td class="muted small" style="white-space:nowrap">${a.submitted_at ? fmtISO(a.submitted_at) : "—"}</td>
+            <td>
+              <a href="/exam-grade?attempt_id=${escapeAttr(a.id)}&exam_id=${escapeAttr(examId)}" class="btn2" style="font-size:12px;padding:5px 10px;border-radius:8px;text-decoration:none;display:inline-block">
+                ${a.grading_status === "AUTO_GRADED" ? "Grade" : "View"}
+              </a>
+            </td>
+          </tr>
+        `;
+      }).join("");
 
       return page(`
         <style>
@@ -931,7 +1005,83 @@ export async function handleExamRequest(ctx) {
 
         <!-- ===== RESULTS PANE ===== -->
         <div id="pane-results" class="pane ${activePane === "results" ? "active" : ""}">
-          <div class="card"><h2>Results</h2><p class="muted">Coming soon.</p></div>
+
+          <div class="card">
+            <div style="display:flex;gap:12px;flex-wrap:wrap">
+              <div style="flex:1;min-width:110px;text-align:center;padding:14px;background:#f6f8f7;border-radius:10px">
+                <div style="font-size:28px;font-weight:800;color:#0b7a75">${totalSubmitted}</div>
+                <div class="muted small">Submitted</div>
+              </div>
+              <div style="flex:1;min-width:110px;text-align:center;padding:14px;background:#f6f8f7;border-radius:10px">
+                <div style="font-size:28px;font-weight:800;color:#555">${inProgressC}</div>
+                <div class="muted small">In Progress</div>
+              </div>
+              <div style="flex:1;min-width:110px;text-align:center;padding:14px;background:${needsGradingC > 0 ? "#fff8e1" : "#f6f8f7"};border-radius:10px">
+                <div style="font-size:28px;font-weight:800;color:${needsGradingC > 0 ? "#e65100" : "#555"}">${needsGradingC}</div>
+                <div class="muted small">Needs Grading</div>
+              </div>
+              ${avgPct !== null ? `
+              <div style="flex:1;min-width:110px;text-align:center;padding:14px;background:#f6f8f7;border-radius:10px">
+                <div style="font-size:28px;font-weight:800;color:#0b7a75">${avgPct}%</div>
+                <div class="muted small">Avg Score</div>
+              </div>` : ""}
+            </div>
+          </div>
+
+          <div class="card" style="padding:12px 16px">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+              <div>
+                <label style="margin:0 0 4px;font-size:12px;font-weight:700;color:rgba(0,0,0,.5)">Grading status</label>
+                <select id="rf-grading" onchange="filterResults()" style="padding:7px 10px">
+                  <option value="">All</option>
+                  <option value="FULLY_GRADED">Fully Graded</option>
+                  <option value="AUTO_GRADED">Needs Grading</option>
+                </select>
+              </div>
+              ${exam.pass_mark_percent !== null && exam.pass_mark_percent !== undefined ? `
+              <div>
+                <label style="margin:0 0 4px;font-size:12px;font-weight:700;color:rgba(0,0,0,.5)">Result</label>
+                <select id="rf-pass" onchange="filterResults()" style="padding:7px 10px">
+                  <option value="">All</option>
+                  <option value="pass">Pass</option>
+                  <option value="fail">Fail</option>
+                </select>
+              </div>` : `<span id="rf-pass" style="display:none"></span>`}
+              <div style="margin-left:auto">
+                <a href="/exam-results-csv?exam_id=${escapeAttr(examId)}" class="btn3" style="font-size:13px;text-decoration:none;display:inline-block">⬇ Export CSV</a>
+              </div>
+            </div>
+          </div>
+
+          ${totalSubmitted === 0 ? `
+          <div class="card" style="text-align:center;padding:32px">
+            <p class="muted">No submissions yet.</p>
+          </div>
+          ` : `
+          <div class="card" style="padding:0;overflow:auto">
+            <table class="table" id="results-table">
+              <thead>
+                <tr>
+                  <th onclick="sortResults('name')" style="cursor:pointer;white-space:nowrap">Student ↕</th>
+                  ${customFields.map((cf) => `<th>${escapeHtml(cf.field_label)}</th>`).join("")}
+                  ${Number(exam.max_attempts) > 1 ? `<th onclick="sortResults('attempt')" style="cursor:pointer"># ↕</th>` : ""}
+                  <th onclick="sortResults('grading')" style="cursor:pointer;white-space:nowrap">Status ↕</th>
+                  <th onclick="sortResults('score')" style="cursor:pointer;white-space:nowrap">Score ↕</th>
+                  <th onclick="sortResults('pct')" style="cursor:pointer;white-space:nowrap">% ↕</th>
+                  ${bands.length > 0 ? `<th>Grade</th>` : ""}
+                  ${exam.pass_mark_percent !== null && exam.pass_mark_percent !== undefined ? `<th>Pass/Fail</th>` : ""}
+                  <th onclick="sortResults('time')" style="cursor:pointer;white-space:nowrap">Time ↕</th>
+                  <th onclick="sortResults('submitted')" style="cursor:pointer;white-space:nowrap">Submitted ↕</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="results-tbody">
+                ${resultRows}
+              </tbody>
+            </table>
+          </div>
+          `}
+
         </div>
 
         <script>
@@ -1043,8 +1193,330 @@ export async function handleExamRequest(ctx) {
             const idx = container.querySelectorAll('.opt-row').length;
             container.insertAdjacentHTML('beforeend', buildOptRow(isMulti,'',false,'',idx));
           }
+
+          function filterResults() {
+            const gf = document.getElementById('rf-grading').value;
+            const pfEl = document.getElementById('rf-pass');
+            const pf = pfEl ? pfEl.value : '';
+            document.querySelectorAll('#results-tbody tr').forEach(row => {
+              let show = true;
+              if (gf && row.dataset.grading !== gf) show = false;
+              if (pf && row.dataset.pass !== pf) show = false;
+              row.style.display = show ? '' : 'none';
+            });
+          }
+
+          let _sortDir = {};
+          function sortResults(col) {
+            const tbody = document.getElementById('results-tbody');
+            if (!tbody) return;
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+            const dir = (_sortDir[col] = _sortDir[col] === 'asc' ? 'desc' : 'asc');
+            const numCols = ['pct', 'attempt', 'time'];
+            const attrMap = {name:'name', attempt:'attempt', grading:'grading', score:'pct', pct:'pct', time:'time', submitted:'submitted'};
+            const attr = attrMap[col] || col;
+            rows.sort((a, b) => {
+              const av = a.dataset[attr] || '';
+              const bv = b.dataset[attr] || '';
+              if (numCols.includes(attr)) {
+                return dir === 'asc' ? (Number(av)||0) - (Number(bv)||0) : (Number(bv)||0) - (Number(av)||0);
+              }
+              return dir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+            });
+            rows.forEach(r => tbody.appendChild(r));
+          }
         </script>
       `);
+    }
+
+    // =============================
+    // Exam: grade submission (GET)
+    // =============================
+    if (path === "/exam-grade" && request.method === "GET") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active || (active.role !== "TEACHER" && active.role !== "SCHOOL_ADMIN")) return redirect("/");
+
+      const attemptId = url.searchParams.get("attempt_id") || "";
+      const examId = url.searchParams.get("exam_id") || "";
+      const viewOnly = url.searchParams.get("view") === "1";
+      if (!attemptId || !examId) return redirect("/teacher");
+
+      const exam = await verifyExamAccess(examId, active.tenant_id, r.user.id, active.role);
+      if (!exam) return redirect("/teacher");
+
+      const attempt = await first(
+        `SELECT ea.*, u.name AS student_name
+         FROM exam_attempts ea
+         JOIN users u ON u.id = ea.user_id
+         WHERE ea.id=? AND ea.exam_id=? AND ea.tenant_id=? AND ea.status='SUBMITTED'`,
+        [attemptId, examId, active.tenant_id]
+      );
+      if (!attempt) return redirect(`/exam-builder?exam_id=${examId}&pane=results`);
+
+      const manualQuestions = await all(
+        `SELECT id, question_type, question_text, marks, sort_order, model_answer
+         FROM exam_questions
+         WHERE exam_id=? AND tenant_id=? AND (question_type='SHORT_ANSWER' OR question_type='ESSAY')
+         ORDER BY sort_order ASC`,
+        [examId, active.tenant_id]
+      );
+
+      const answers = await all(
+        `SELECT a.question_id, a.answer_json, a.score_awarded, a.teacher_note, a.graded_by, a.graded_at,
+                gb.name AS graded_by_name
+         FROM exam_answers a
+         LEFT JOIN users gb ON gb.id = a.graded_by
+         WHERE a.attempt_id=?`,
+        [attemptId]
+      );
+      const answersByQ = {};
+      for (const a of answers) answersByQ[a.question_id] = a;
+
+      const fmtSecs = (secs) => {
+        if (secs === null || secs === undefined) return "—";
+        const s = Number(secs);
+        const h = Math.floor(s / 3600);
+        const m = Math.floor((s % 3600) / 60);
+        const sec = s % 60;
+        if (h > 0) return `${h}h ${m}m`;
+        if (m > 0) return `${m}m ${sec}s`;
+        return `${sec}s`;
+      };
+
+      const scoreStr = attempt.score_raw !== null && attempt.score_raw !== undefined
+        ? `${Number(attempt.score_raw)} / ${Number(attempt.score_total)} (${Number(attempt.score_pct)}%)`
+        : "Not yet calculated";
+
+      const disabled = viewOnly ? "disabled" : "";
+
+      const questionCards = manualQuestions.map((q) => {
+        const ans = answersByQ[q.id] || {};
+        const studentAnswer = ans.answer_json || "";
+        const scoreVal = ans.score_awarded !== null && ans.score_awarded !== undefined ? Number(ans.score_awarded) : "";
+        const teacherNote = ans.teacher_note || "";
+        const gradedByName = ans.graded_by_name || "";
+        const gradedAt = ans.graded_at || "";
+        return `
+          <div class="card" style="margin:8px 0">
+            <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;margin-bottom:8px">
+              <span class="pill" style="font-size:11px">${escapeHtml(qTypeLabel(q.question_type))}</span>
+              <span class="muted small">${escapeHtml(String(q.marks))} mark${Number(q.marks) !== 1 ? "s" : ""}</span>
+            </div>
+            <div style="font-size:15px;font-weight:600;margin-bottom:12px">${escapeHtml(q.question_text)}</div>
+            <div style="background:#f6f8f7;border-radius:10px;padding:12px;margin-bottom:10px">
+              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:rgba(0,0,0,.45);margin-bottom:6px">Student's Answer</div>
+              <div style="font-size:14px;white-space:pre-wrap">${escapeHtml(studentAnswer)}</div>
+            </div>
+            ${q.model_answer ? `
+            <details style="margin-bottom:10px">
+              <summary style="cursor:pointer;font-size:13px;color:rgba(0,0,0,.5);font-weight:600">Show model answer</summary>
+              <div style="background:#f0fff8;border-radius:10px;padding:10px;margin-top:6px;font-size:14px;white-space:pre-wrap">${escapeHtml(q.model_answer)}</div>
+            </details>` : ""}
+            <div class="row" style="margin-bottom:8px">
+              <div>
+                <label>Score awarded (max ${escapeHtml(String(q.marks))})</label>
+                <input type="number" name="score_${escapeAttr(q.id)}" value="${scoreVal !== "" ? escapeAttr(String(scoreVal)) : ""}"
+                       min="0" max="${escapeAttr(String(q.marks))}" step="0.5" style="max-width:140px" ${disabled} />
+              </div>
+            </div>
+            <div>
+              <label>Teacher note (optional)</label>
+              <textarea name="note_${escapeAttr(q.id)}" rows="2" style="resize:vertical" ${disabled}>${escapeHtml(teacherNote)}</textarea>
+            </div>
+            ${gradedByName ? `
+            <div style="margin-top:8px;font-size:12px;color:rgba(0,0,0,.45)">
+              Last graded by ${escapeHtml(gradedByName)}${gradedAt ? " on " + fmtISO(gradedAt) : ""}
+            </div>` : ""}
+          </div>
+        `;
+      }).join("");
+
+      const formWrap = viewOnly
+        ? questionCards
+        : `<form method="post" action="/exam-grade">
+            <input type="hidden" name="attempt_id" value="${escapeAttr(attemptId)}" />
+            <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
+            ${questionCards}
+            <div class="card" style="padding:12px 16px">
+              <div class="actions">
+                <button class="btn2" type="submit">Save grades</button>
+                <a href="/exam-builder?exam_id=${escapeAttr(examId)}&pane=results" class="btn3" style="text-decoration:none">Cancel</a>
+              </div>
+            </div>
+          </form>`;
+
+      return page(`
+        <div class="card">
+          <div style="font-size:12px;color:rgba(0,0,0,.45);margin-bottom:4px">
+            <a href="/exam-builder?exam_id=${escapeAttr(examId)}&pane=results">← Back to results</a>
+          </div>
+          <h1 style="margin:0 0 4px">${viewOnly ? "View submission" : "Grade submission"}</h1>
+          <div class="muted small">${escapeHtml(exam.title)}</div>
+        </div>
+
+        ${viewOnly ? `<div style="background:#e8f4fd;border:1px solid #90caf9;border-radius:10px;padding:10px 14px;margin-bottom:8px;font-size:13px;color:#1565c0">Read-only view — this submission is already fully graded.</div>` : ""}
+
+        <div class="card">
+          <div class="row">
+            <div><label style="margin:0 0 2px">Student</label><div style="font-weight:600">${escapeHtml(attempt.student_name)}</div></div>
+            <div><label style="margin:0 0 2px">Attempt #</label><div>${attempt.attempt_no}</div></div>
+            <div><label style="margin:0 0 2px">Submitted</label><div>${attempt.submitted_at ? fmtISO(attempt.submitted_at) : "—"}</div></div>
+            <div><label style="margin:0 0 2px">Time taken</label><div>${fmtSecs(attempt.time_taken_secs)}</div></div>
+          </div>
+          <div style="margin-top:12px;padding:10px;background:#f6f8f7;border-radius:10px;font-size:13px">
+            Auto-graded score so far: <b>${scoreStr}</b>
+          </div>
+        </div>
+
+        ${manualQuestions.length === 0
+          ? `<div class="card"><p class="muted">No manually-graded questions in this exam.</p></div>`
+          : formWrap
+        }
+      `);
+    }
+
+    // =============================
+    // Exam: grade submission (POST)
+    // =============================
+    if (path === "/exam-grade" && request.method === "POST") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active || (active.role !== "TEACHER" && active.role !== "SCHOOL_ADMIN")) return redirect("/");
+
+      const f = await form();
+      const attemptId = (f.attempt_id || "").trim();
+      const examId = (f.exam_id || "").trim();
+      if (!attemptId || !examId) return redirect("/teacher");
+
+      const exam = await verifyExamAccess(examId, active.tenant_id, r.user.id, active.role);
+      if (!exam) return redirect("/teacher");
+
+      const attempt = await first(
+        `SELECT id FROM exam_attempts WHERE id=? AND exam_id=? AND tenant_id=? AND status='SUBMITTED'`,
+        [attemptId, examId, active.tenant_id]
+      );
+      if (!attempt) return redirect(`/exam-builder?exam_id=${examId}&pane=results`);
+
+      const manualQuestions = await all(
+        `SELECT id, marks FROM exam_questions
+         WHERE exam_id=? AND tenant_id=? AND (question_type='SHORT_ANSWER' OR question_type='ESSAY')`,
+        [examId, active.tenant_id]
+      );
+
+      const ts = nowISO();
+      for (const q of manualQuestions) {
+        const scoreStr = (f[`score_${q.id}`] || "").trim();
+        if (scoreStr === "") continue;
+        const score = Math.max(0, Math.min(Number(q.marks), parseFloat(scoreStr) || 0));
+        const note = (f[`note_${q.id}`] || "").trim() || null;
+        await run(
+          `UPDATE exam_answers SET score_awarded=?, teacher_note=?, graded_by=?, graded_at=?, updated_at=?
+           WHERE attempt_id=? AND question_id=?`,
+          [score, note, r.user.id, ts, ts, attemptId, q.id]
+        );
+      }
+
+      await recalcAttempt(attemptId, active.tenant_id, env.DB);
+      return redirect(`/exam-builder?exam_id=${examId}&pane=results`);
+    }
+
+    // =============================
+    // Exam: export results CSV (GET)
+    // =============================
+    if (path === "/exam-results-csv" && request.method === "GET") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active || (active.role !== "TEACHER" && active.role !== "SCHOOL_ADMIN")) return redirect("/");
+
+      const examId = url.searchParams.get("exam_id") || "";
+      if (!examId) return redirect("/teacher");
+
+      const exam = await verifyExamAccess(examId, active.tenant_id, r.user.id, active.role);
+      if (!exam) return redirect("/teacher");
+
+      const customFieldDefs = await all(
+        `SELECT id, field_label FROM exam_custom_fields WHERE exam_id=? ORDER BY sort_order ASC`,
+        [examId]
+      );
+
+      const attempts = await all(
+        `SELECT ea.id, u.name AS student_name, ea.attempt_no, ea.grading_status,
+                ea.score_raw, ea.score_total, ea.score_pct, ea.grade,
+                ea.pass_mark_percent, ea.time_taken_secs, ea.submitted_at, ea.custom_fields_json
+         FROM exam_attempts ea
+         JOIN users u ON u.id = ea.user_id
+         WHERE ea.exam_id=? AND ea.tenant_id=? AND ea.status='SUBMITTED'
+         ORDER BY u.name ASC, ea.attempt_no ASC`,
+        [examId, active.tenant_id]
+      );
+
+      const csvEsc = (v) => {
+        const s = v === null || v === undefined ? "" : String(v);
+        if (s.includes(",") || s.includes('"') || s.includes("\n")) return '"' + s.replaceAll('"', '""') + '"';
+        return s;
+      };
+
+      const fmtSecsCsv = (secs) => {
+        if (secs === null || secs === undefined) return "";
+        const s = Number(secs);
+        const h = Math.floor(s / 3600);
+        const m = Math.floor((s % 3600) / 60);
+        const sec = s % 60;
+        if (h > 0) return `${h}h ${m}m`;
+        if (m > 0) return `${m}m ${sec}s`;
+        return `${sec}s`;
+      };
+
+      const hasAttemptNo = Number(exam.max_attempts) > 1;
+      const hasPassFail = exam.pass_mark_percent !== null && exam.pass_mark_percent !== undefined;
+
+      const headers = [
+        "Student Name",
+        ...customFieldDefs.map((cf) => cf.field_label),
+        ...(hasAttemptNo ? ["Attempt #"] : []),
+        "Grading Status",
+        "Score",
+        "Total",
+        "%",
+        "Grade",
+        ...(hasPassFail ? ["Pass/Fail"] : []),
+        "Time Taken",
+        "Submitted At",
+      ];
+
+      const rows = attempts.map((a) => {
+        let cfData = {};
+        try { cfData = JSON.parse(a.custom_fields_json || "{}"); } catch(e) {}
+        const passed = hasPassFail && a.score_pct !== null && a.score_pct !== undefined
+          ? (Number(a.score_pct) >= Number(a.pass_mark_percent) ? "Pass" : "Fail")
+          : "";
+        return [
+          a.student_name,
+          ...customFieldDefs.map((cf) => cfData[cf.id] || ""),
+          ...(hasAttemptNo ? [a.attempt_no] : []),
+          a.grading_status === "AUTO_GRADED" ? "Needs Grading" : "Fully Graded",
+          a.score_raw !== null && a.score_raw !== undefined ? Number(a.score_raw) : "",
+          a.score_total !== null && a.score_total !== undefined ? Number(a.score_total) : "",
+          a.score_pct !== null && a.score_pct !== undefined ? Number(a.score_pct) : "",
+          a.grade || "",
+          ...(hasPassFail ? [passed] : []),
+          fmtSecsCsv(a.time_taken_secs),
+          a.submitted_at ? fmtISO(a.submitted_at) : "",
+        ].map(csvEsc).join(",");
+      });
+
+      const csv = [headers.map(csvEsc).join(","), ...rows].join("\n");
+      const safeTitle = (exam.title || "results").replace(/[^a-z0-9-]/gi, "_").slice(0, 50);
+      return new Response(csv, {
+        headers: {
+          "Content-Type": "text/csv; charset=utf-8",
+          "Content-Disposition": `attachment; filename="${safeTitle}-${examId.slice(0, 8)}.csv"`,
+        },
+      });
     }
 
     // =============================

@@ -45,7 +45,9 @@ export async function onRequest(ctx) {
     path === "/exam-access-add-class" ||
     path === "/exam-access-add-course" ||
     path === "/exam-access-add-student" ||
-    path === "/exam-access-remove"
+    path === "/exam-access-remove" ||
+    path === "/exam-grade" ||
+    path === "/exam-results-csv"
   ) {
     return handleExamRequest(ctx);
   }
