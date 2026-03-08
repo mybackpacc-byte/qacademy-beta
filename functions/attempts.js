@@ -1252,7 +1252,7 @@ export async function handleAttemptRequest(ctx) {
         <div class="card">
           ${resultsReleased
             ? `<p style="margin:0 0 12px;font-size:15px">Your results are available.</p>
-               <button class="btn2" disabled style="opacity:.45;cursor:not-allowed">View Results</button>`
+               <a href="/attempt-results?attempt_id=${escapeAttr(attemptId)}" class="btn2" style="display:inline-block;padding:10px 16px;text-decoration:none">View Results</a>`
             : `<p style="margin:0;font-size:15px;color:rgba(0,0,0,.55)">Your results will be released by your teacher.</p>`
           }
         </div>

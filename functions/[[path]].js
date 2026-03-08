@@ -6,6 +6,7 @@ import { handleAppRequest } from "./app.js";
 import { handleExamRequest } from "./exams.js";
 import { handleQuestionBankRequest } from "./question-bank.js";
 import { handleAttemptRequest } from "./attempts.js";
+import { handleResultsRequest } from "./results.js";
 
 export async function onRequest(ctx) {
   const url = new URL(ctx.request.url);
@@ -18,6 +19,14 @@ export async function onRequest(ctx) {
     path === "/attempt-complete"
   ) {
     return handleAttemptRequest(ctx);
+  }
+
+  // Results routes
+  if (
+    path === "/attempt-results" ||
+    path === "/attempt-review"
+  ) {
+    return handleResultsRequest(ctx);
   }
 
   // Question bank routes
