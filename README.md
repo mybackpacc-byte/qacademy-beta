@@ -1,3 +1,4 @@
+
 # QAcademy Beta — Project Summary
 *This document is for Claude's Project Knowledge. It summarises everything built so far, the tech stack, decisions made, and what comes next.*
 
@@ -40,6 +41,7 @@ A **multi-tenant exam taking platform for schools.**
 - Claude Desktop handles all DB changes via `wrangler d1 execute beta_db --remote`
 - No more manual query pane needed for schema changes
 - Browser Claude.ai is used for planning, reviewing, and generating summaries
+- Always commit and push directly to the **main** branch — never create a new branch
 
 ---
 
@@ -47,10 +49,12 @@ A **multi-tenant exam taking platform for schools.**
 ```
 functions/
   [[path]].js       → Entry point router — directs traffic to correct handler
-  shared.js         → All shared helpers (auth, DB, crypto, cookies, HTML)
+  shared.js         → All shared helpers (auth, DB, crypto, cookies, HTML) + recalcAttempt
   app.js            → User, auth, school, admin routes
-  exams.js          → Exam builder routes
+  exams.js          → Exam builder routes + teacher results pane + grading screen
   question-bank.js  → Question bank routes
+  attempts.js       → Exam taking engine routes (student)
+  results.js        → Student results page, review page (future), sitting results (future)
 
 db/
   schema.sql        → Reference schema — run once in D1 for a fresh clone
@@ -66,7 +70,11 @@ The double brackets are **required by Cloudflare Pages** — it's their syntax f
 /question-bank, /qbank-*                → question-bank.js
 /exam-create, /exam-builder,
 /exam-save-settings, /exam-*,
-/exam-bank-picker, /exam-add-from-bank  → exams.js
+/exam-bank-picker, /exam-add-from-bank,
+/exam-grade, /exam-results-csv          → exams.js
+/attempt-start, /attempt-take,
+/attempt-complete                       → attempts.js
+/attempt-results, /attempt-review       → results.js
 everything else                         → app.js
 ```
 
@@ -100,7 +108,7 @@ everything else                         → app.js
 | System Admin | `/sys` — platform-wide |
 | School Admin | `/school` — manages one school |
 | Teacher | `/teacher` — creates exams |
-| Student | `/student` — takes exams (shell only) |
+| Student | `/student` — takes exams and views results |
 
 ---
 
@@ -125,7 +133,15 @@ everything else                         → app.js
 12. `exam_custom_fields` — custom fields per exam
 13. `exam_questions` — questions per exam
 14. `exam_question_options` — options per question (column: `question_id`)
-19. `exam_access` — students/users explicitly granted access to an exam
+19. `exam_access` — students explicitly granted access to an exam
+
+### Exam taking engine tables
+21. `exam_attempts` — one row per student attempt at an exam
+22. `exam_answers` — one row per question per attempt
+
+### Sittings tables
+23. `exam_sittings` — groups multiple exam papers into one sitting (School Admin controlled)
+24. `exam_sitting_papers` — which exams belong to which sitting
 
 ### Question bank tables
 15. `question_bank` — master question library
@@ -142,8 +158,18 @@ These are DIFFERENT — all SQL must use the correct column name for each table.
 ### Schema management
 - `db/schema.sql` is the single source of truth — fully verified against live D1 on 2026-03-07
 - For a fresh clone: paste the entire `schema.sql` into D1 query pane and run — no ALTER TABLEs needed
-- For an existing DB: use `wrangler d1 execute beta_db --remote --command "ALTER TABLE ..."` via Claude Desktop
+- For an existing DB: use `wrangler d1 execute beta_db --remote --command "..."` via Claude Desktop
 - All historical ALTER TABLEs are documented at the bottom of `schema.sql` for reference
+- Always update `schema.sql` AND run the wrangler command on live DB — never let them drift
+
+### Indexes on D1
+```
+idx_exam_attempts_exam_id
+idx_exam_attempts_user_id
+idx_exam_attempts_sitting_id
+idx_exam_answers_attempt_id
+idx_exam_answers_question_id
+```
 
 ---
 
@@ -152,7 +178,7 @@ These are DIFFERENT — all SQL must use the correct column name for each table.
 ### System Admin (`/sys`) — COMPLETE
 ### School Admin (`/school`) — COMPLETE (including Class management)
 ### Teacher (`/teacher`) — COMPLETE (with exam builder + question bank)
-### Student (`/student`) — SHELL ONLY
+### Student (`/student`) — COMPLETE
 
 ---
 
@@ -175,9 +201,10 @@ All fields: title, description, duration, max attempts, schedule, late policy, p
 - Badge shows "📚 From bank" on questions linked to the bank
 
 ### Publish Pane — COMPLETE
-- Publish exam (locks questions and settings)
-- Close exam
-- Release results
+- Three always-visible blocks: Publish, Close, Release Results
+- Full settings summary before publishing
+- Padlock icons and faded disabled buttons with clear explanatory messages
+- Date stamps on Close and Release Results blocks
 - IMMEDIATE policy sets `results_published_at` on publish
 - AFTER_CLOSE policy sets `results_published_at` on close
 
@@ -185,7 +212,29 @@ All fields: title, description, duration, max attempts, schedule, late policy, p
 - Assign students to an exam by class, by course, or individually
 - Uses `exam_access` table
 
-### Results Pane — STUB (coming soon)
+### Results Pane — COMPLETE
+- Full submission table — one row per attempt
+- Columns: student name, custom field answers, attempt number, grading status, score, percentage, grade, pass/fail, time taken, submitted at
+- Summary block: total submissions, in progress, needs grading, average score
+- Filters: grading status, pass/fail, class (client-side)
+- Sortable columns: name, score, submitted at, time taken
+- Export CSV button → `GET /exam-results-csv?exam_id=X`
+- Grade button → `/exam-grade?attempt_id=X` for needs grading
+- View button → `/exam-grade?attempt_id=X&view=1` for fully graded
+
+---
+
+## ✏️ Grading Screen — COMPLETE (`/exam-grade`)
+
+- Shows ALL questions ordered by `sort_order` (original teacher order — not student shuffle order)
+- MCQ/True-False/Multiple Select — read only, shows student answer with ✅ ❌ highlighting, marks awarded
+- Short Answer/Essay — student answer, model answer toggle, score input, teacher note field
+- Desktop: two column layout — questions left, grading attention sidebar right
+- Mobile: floating button opens drawer with questions needing grading
+- Sidebar shows only ungraded manual questions, removes them in real time as teacher enters scores
+- Live score total updates as teacher types
+- `view=1` mode — fully read only, all questions visible, used for reviewing fully graded attempts
+- On save: calls `recalcAttempt` from `shared.js` to recalculate totals, redirects to results pane
 
 ---
 
@@ -202,45 +251,127 @@ All fields: title, description, duration, max attempts, schedule, late policy, p
 | `/exam-bank-picker` | Browse bank to pick questions for an exam |
 | `/exam-add-from-bank` | POST: copy bank question into exam |
 
-### Visibility Rules
-- **PERSONAL** — only the creating teacher can see and use it. Default for all new questions.
-- **SCHOOL** — all teachers in the same school can see and add it to their exams
-- Only the question owner can edit, delete, or toggle visibility
-- Other teachers can use SCHOOL questions read-only
+---
 
-### Bank Sync Rules
-- Every question added inline in the exam builder is **auto-saved to the bank as PERSONAL**
-- `bank_question_id` on `exam_questions` links back to the bank source
-- While exam is **DRAFT**: editing an exam question syncs the changes back to the bank
-- Once exam is **PUBLISHED**: exam copy is frozen — bank evolves independently
-- Deleting from bank sets `bank_question_id=NULL` on linked exam questions (does not delete them)
+## 🎓 Student Dashboard — COMPLETE
 
-### Filters
-- Filter by question type
-- Filter by visibility (All / My questions / School questions)
+- Shows all exams the student has access to via `exam_access`
+- Status badges: Open (green), Upcoming (grey), Closed (red), Completed (blue)
+- DRAFT exams never shown to students
+- Shows 🔒 icon if exam is password protected
+- Shows 📋 icon if exam has custom fields
+- Attempts remaining shown per exam
+- **Button logic:**
+  - IN_PROGRESS attempt exists → **Resume Exam** button only
+  - No in progress, attempts remaining → **Start Exam** button
+  - One submitted attempt → single **View Results** button (active if released, disabled if not)
+  - Multiple submitted attempts → one **View Results** button per attempt labelled Attempt 1, Attempt 2 etc
+
+---
+
+## 🏃 Exam Taking Engine — COMPLETE (`attempts.js`)
+
+### Routes
+| Route | What It Does |
+|---|---|
+| `GET /attempt-start` | Pre-flight wizard — password, custom fields, instructions |
+| `POST /attempt-start` | Advances wizard steps, creates attempt on final step |
+| `GET /attempt-take` | Live exam screen |
+| `POST /attempt-take` | Autosave (`action=save`) and submit (`action=submit`) |
+| `GET /attempt-complete` | Completion screen |
+
+### Key features
+- One active attempt at a time enforcement
+- Password re-validated on every POST — no cookies
+- Custom field answers carried as hidden fields through wizard
+- `question_order_json` snapshotted on attempt creation (shuffle happens here)
+- `effective_duration_secs` = min(duration × 60, seconds until ends_at)
+- Warning banner if effective duration shorter than full duration
+- HARD_CUT enforcement server-side on every POST
+- Auto-submit on timer expiry (client JS + server enforcement)
+- Answers stored as option IDs — correct answers never in browser HTML
+- Pre-submit unanswered question warning with count
+
+### FREE mode navigation
+- One question at a time
+- Desktop: two column layout — question left, grid sidebar right
+- Mobile: floating 📋 button opens drawer
+- Question grid squares: grey (unanswered), green (answered), orange (flagged), highlighted border (current)
+- Three views: All / 🚩 Flagged / ⬜ Unanswered
+- Flagged and Unanswered views filter grid AND Previous/Next cycling
+- Unanswered view auto-advances when student answers current question
+- Grid updates live in real time — no page reload
+
+### SEQUENTIAL mode
+- One question at a time, forward only
+- No Previous button
+- No flagging
+- No grid or sidebar
+- Next becomes Submit on last question
+
+---
+
+## 🤖 Auto Grading — COMPLETE
+
+Runs immediately on submit inside `POST /attempt-take`:
+- **MCQ / TRUE_FALSE** — checks selected option ID against `is_correct = 1`
+- **MULTIPLE_SELECT** — full marks or zero if `partial_marking = 0`; proportional marks with deductions if `partial_marking = 1`, floored at 0
+- **SHORT_ANSWER / ESSAY** — skipped, left for manual grading
+- Recalculates `score_raw`, `score_total`, `score_pct`, `grade`, `grading_status` via `recalcAttempt` in `shared.js`
+- `grading_status` = `FULLY_GRADED` if no manual questions, `AUTO_GRADED` if manual questions remain
+
+---
+
+## 📊 Student Results Page — COMPLETE (`results.js`)
+
+### Route: `GET /attempt-results?attempt_id=X`
+
+- Only accessible when `results_published_at` is set and in the past
+- If not released → clean "not released yet" message, nothing else shown
+
+### Sections
+1. **Header** — school name, exam title, course, class
+2. **Student details** — name, custom field answers, attempt number, submitted at, time taken
+3. **Exam details** — total marks, questions, duration, pass mark, grade bands table
+4. **Result** — score/percentage/grade respecting `score_display` setting, Pass/Fail badge
+5. **Actions** — Review My Answers (if `allow_review = 1`), Back to My Exams, 🖨 Print button
+
+### score_display behaviour
+- `BOTH` → percentage + raw marks
+- `PERCENT` → percentage only
+- `MARKS` → raw marks only
+- `NONE` → grade and pass/fail only, no numbers
+
+### Print
+- `@media print` CSS hides action buttons
+- Page prints as a clean official result slip
 
 ---
 
 ## ⏳ What Comes Next (In Order)
 
-### Phase 4 — Exam Taking Engine
-- [ ] New tables needed: `exam_submissions`, `exam_answers`
-- [ ] Student sees available exams on their dashboard
-- [ ] Exam password check before starting
-- [ ] Custom fields collected before exam starts
-- [ ] Timed exam with countdown timer
-- [ ] Auto-save answers every 30 seconds
-- [ ] Auto-submit on time expiry
-- [ ] One attempt at a time enforcement
+### Phase 6 — Student Review Page
+- [ ] `GET /attempt-review?attempt_id=X`
+- [ ] Only accessible if `allow_review = 1` AND results released
+- [ ] Shows all questions in `question_order_json` order (the order student saw them)
+- [ ] Student's answer, correct answer, marks awarded per question
+- [ ] Read only — no editing
 
-### Phase 5 — Grading & Results
-- [ ] Auto-grade MCQ and True/False
-- [ ] Teacher manually grades Short Answer and Essay
-- [ ] Results pane — view submissions, grades
-- [ ] Publish results to students
-- [ ] Student review mode (if allow_review enabled)
+### Phase 8 — Sittings (School Admin)
+- [ ] Create sittings, assign papers
+- [ ] Sitting results page — combined view across papers
+- [ ] Drill into individual paper → `/attempt-results?attempt_id=X`
 
-### Phase 6 — Question Bank bulk import (CSV/Excel)
+### Phase 9 — Question Bank bulk import (CSV/Excel)
+
+### Future improvements noted
+- **Results pane** — summary cards showing total pass/fail counts, filter by grade band
+- **Grading view** — currently shows all questions, teacher sees full attempt context
+- **exam_access extension** — add `access_source` (CLASS/COURSE/INDIVIDUAL) and `source_id` columns to track how each student was granted access. Enables accurate class display on result slip and clean removal of access by class.
+- **Anti-cheat / proctoring** — Page Visibility API to detect tab switching, Fullscreen API enforcement, violation log on `exam_attempts` as `violations_json`, configurable auto-submit after X violations, teacher sees violation summary in results pane
+- **question_display setting** — add `ONE_AT_A_TIME | ALL` to exam settings for teacher to override FREE mode display. New column on `exams` table, snapshot onto `exam_attempts`.
+- **Student review page** — shows questions in `question_order_json` order (student's experience), gated behind `allow_review = 1` and results released
+- **Printable marksheet** — teacher prints grading screen as official marksheet, questions in `sort_order`
 
 ### Phase 2 — Auth Improvements (Deferred)
 - [ ] Forgot password flow
@@ -251,7 +382,7 @@ All fields: title, description, duration, max attempts, schedule, late policy, p
 
 ## 💡 Important Decisions & Preferences
 
-- **Modular file structure** — split into shared.js, app.js, exams.js, question-bank.js
+- **Modular file structure** — split into shared.js, app.js, exams.js, question-bank.js, attempts.js, results.js
 - **No third party auth** — custom built
 - **SQLite via D1** — TEXT for IDs and timestamps
 - **PBKDF2** passwords, 40,000 iterations, pepper from `env.APP_SECRET`
@@ -263,7 +394,18 @@ All fields: title, description, duration, max attempts, schedule, late policy, p
 - **System Admin stays in `/sys` only** — no access to school content unless given a membership
 - **Two exam access modes**: Structured (course/class based) and Open (password only)
 - **Questions and settings locked once exam is PUBLISHED** — teachers contact support for edits (deferred)
-- **Schema changes**: always update `schema.sql` AND run the wrangler command on live DB — never let them drift
+- **Always commit directly to main** — never create a new branch
+- **Exam taking engine is specialised** — it only runs exams, never handles results or grading
+- **Exam complete screen** — engine shows "results available" or "results released later" depending on policy, then student navigates to results page separately
+- **Two results paths** — standalone exam results and sitting results (combined papers)
+- **Sittings are a grouping layer only** — individual exams are unchanged, sitting just links them together
+- **Key settings snapshotted on attempt** — `score_display`, `pass_mark_percent`, `grade_bands_json`, `question_order_json` stored on `exam_attempts` so results always reflect settings at time of sitting
+- **Publish pane design principle** — always show all blocks, explain why buttons are disabled, never hide
+- **Grading screen shows questions in `sort_order`** — original teacher order, not student shuffle order
+- **Student review page shows questions in `question_order_json` order** — the order the student actually saw
+- **Teacher always sees full scores** — `score_display` setting only affects what students see
+- **New columns before new tables** — always consider adding columns to existing tables before creating new ones
+- **recalcAttempt lives in shared.js** — used by both auto grading (attempts.js) and manual grading (exams.js)
 - When doing a full rewrite of all files, always verify actual D1 column names match code before deploying
 
 ---
@@ -278,12 +420,15 @@ APP_SECRET   → pepper for password hashing (set in Cloudflare Pages settings)
 ## 🐛 Bugs Fixed & Lessons Learned
 
 - `question_bank_options` table uses `bank_question_id` (not `question_id`) — always check actual D1 column names with `PRAGMA table_info(table_name)` before writing SQL
-- When rewriting files, the safest approach is to rewrite ALL five files at once to guarantee they are in sync
+- When rewriting files, the safest approach is to rewrite ALL files at once to guarantee they are in sync
 - Cloudflare D1 does not support `pragma_table_info` in a JOIN or `WHERE m.type = 'table'` — use `PRAGMA table_info(table_name)` directly, one table at a time
 - Duplicate add-from-bank bug fixed — check for existing `bank_question_id` before inserting
 - `ends_at` past date edge case fixed in Publish pane
 - IMMEDIATE policy sets `results_published_at` on publish; AFTER_CLOSE sets it on close
+- Claude Desktop defaults to creating new branches — always explicitly instruct it to commit directly to main
+- `exam_access` does not have a `resource_type` column — class lookup must go via `class_students` joined to `classes`, not via `exam_access`
+- Large handler rewrites frequently hit the 32000 output token limit — always instruct Claude to split into two parts if this happens
 
 ---
 
-*Last updated: 2026-03-07. Schema fully verified and cleaned up. Wrangler installed — Claude Desktop now manages all DB changes. Access pane complete. Next: Exam Taking Engine (Phase 4).*
+*Last updated: 2026-03-08. Exam taking engine complete. Auto grading complete. Teacher results pane and manual grading screen complete. Student results page complete. Student dashboard button logic updated (Resume/Start/View Results per attempt). Next: Student Review Page (Phase 6).*
