@@ -260,7 +260,7 @@ export async function handleResultsRequest(ctx) {
     }
 
     // ----------------------------------------------------------------
-    // GET /attempt-review  (stub — coming soon)
+    // GET /attempt-review
     // ----------------------------------------------------------------
     if (path === "/attempt-review" && request.method === "GET") {
       const r = await requireLogin();
@@ -269,19 +269,252 @@ export async function handleResultsRequest(ctx) {
       if (!active || active.role !== "STUDENT") return redirect("/student");
 
       const attemptId = url.searchParams.get("attempt_id") || "";
+      if (!attemptId) return redirect("/student");
+
+      const attempt = await first(
+        `SELECT * FROM exam_attempts WHERE id=? AND user_id=? AND tenant_id=? AND status='SUBMITTED'`,
+        [attemptId, r.user.id, active.tenant_id]
+      );
+      if (!attempt) return redirect("/student");
+
+      const exam = await first(
+        `SELECT * FROM exams WHERE id=? AND tenant_id=?`,
+        [attempt.exam_id, active.tenant_id]
+      );
+      if (!exam) return redirect("/student");
+
+      const backLink = `<a href="/attempt-results?attempt_id=${escapeAttr(attemptId)}" style="font-size:13px;color:rgba(0,0,0,.45)">&#8592; Back to Results</a>`;
+
+      if (Number(exam.allow_review) !== 1) {
+        return page(`
+          <div class="card" style="margin-bottom:8px">${backLink}</div>
+          <div class="card" style="text-align:center;padding:32px 24px">
+            <div style="font-size:40px;margin-bottom:12px">&#128274;</div>
+            <h1 style="margin:0 0 8px">Review not available</h1>
+            <p class="muted">Review of answers is not enabled for this exam.</p>
+            <div style="margin-top:20px">${backLink}</div>
+          </div>
+        `);
+      }
+
+      const resultsReleased =
+        exam.results_published_at &&
+        Date.parse(exam.results_published_at) <= Date.now();
+
+      if (!resultsReleased) {
+        return page(`
+          <div class="card" style="margin-bottom:8px">${backLink}</div>
+          <div class="card" style="text-align:center;padding:32px 24px">
+            <div style="font-size:40px;margin-bottom:12px">&#128274;</div>
+            <h1 style="margin:0 0 8px">Results not yet released</h1>
+            <p class="muted">Your results have not been released yet. Please check back later.</p>
+            <div style="margin-top:20px">${backLink}</div>
+          </div>
+        `);
+      }
+
+      // Parse question order (the order the student saw them)
+      let questionOrder = [];
+      try { questionOrder = JSON.parse(attempt.question_order_json || "[]"); } catch(e) {}
+
+      // Load questions, then reorder to match question_order_json
+      let questions = [];
+      const optionsByQ = {};
+      if (questionOrder.length > 0) {
+        const ph = questionOrder.map(() => "?").join(",");
+        const questionRows = await all(
+          `SELECT id, question_type, question_text, marks, model_answer, feedback
+           FROM exam_questions WHERE id IN (${ph})`,
+          questionOrder
+        );
+        const questionMap = {};
+        for (const q of questionRows) questionMap[q.id] = q;
+        questions = questionOrder.map(id => questionMap[id]).filter(Boolean);
+
+        // Load options (using question_id column)
+        const optRows = await all(
+          `SELECT id, question_id, option_text, is_correct, feedback, sort_order
+           FROM exam_question_options WHERE question_id IN (${ph}) ORDER BY sort_order ASC`,
+          questionOrder
+        );
+        for (const o of optRows) {
+          if (!optionsByQ[o.question_id]) optionsByQ[o.question_id] = [];
+          optionsByQ[o.question_id].push(o);
+        }
+      }
+
+      // Load answers for this attempt
+      const answerRows = await all(
+        `SELECT question_id, answer_json, score_awarded, teacher_note FROM exam_answers WHERE attempt_id=?`,
+        [attemptId]
+      );
+      const answersByQ = {};
+      for (const a of answerRows) answersByQ[a.question_id] = a;
+
+      // ---------- Compact score banner (same logic as results page) ----------
+      const sd = attempt.score_display || "BOTH";
+      const scorePct = attempt.score_pct !== null && attempt.score_pct !== undefined
+        ? Number(attempt.score_pct) : null;
+      const scoreRaw = attempt.score_raw !== null && attempt.score_raw !== undefined
+        ? Number(attempt.score_raw) : null;
+      const scoreTotal = attempt.score_total !== null && attempt.score_total !== undefined
+        ? Number(attempt.score_total) : null;
+
+      const bannerParts = [];
+      if (sd === "BOTH" && scorePct !== null && scoreRaw !== null) {
+        bannerParts.push(`<b style="font-size:16px;color:#0b7a75">${Math.round(scorePct)}%</b> <span class="muted">&mdash; ${scoreRaw} / ${scoreTotal} marks</span>`);
+      } else if (sd === "PERCENT" && scorePct !== null) {
+        bannerParts.push(`<b style="font-size:16px;color:#0b7a75">${Math.round(scorePct)}%</b>`);
+      } else if (sd === "MARKS" && scoreRaw !== null) {
+        bannerParts.push(`<b style="font-size:16px;color:#0b7a75">${scoreRaw} / ${scoreTotal} marks</b>`);
+      }
+      if (attempt.grade) {
+        bannerParts.push(`Grade: <b>${escapeHtml(String(attempt.grade))}</b>`);
+      }
+      if (attempt.pass_mark_percent !== null && attempt.pass_mark_percent !== undefined && scorePct !== null) {
+        const passed = scorePct >= Number(attempt.pass_mark_percent);
+        bannerParts.push(passed
+          ? `<span style="background:#d4f5e9;color:#0b5e4e;border-radius:999px;padding:2px 10px;font-size:13px;font-weight:700">&#10003; PASS</span>`
+          : `<span style="background:#fff3f3;color:#c00;border-radius:999px;padding:2px 10px;font-size:13px;font-weight:700">&#10007; FAIL</span>`
+        );
+      }
+      const noResultInfo = sd === "NONE" && !attempt.grade &&
+        (attempt.pass_mark_percent === null || attempt.pass_mark_percent === undefined);
+      const scoreBanner = noResultInfo
+        ? `<span class="muted">Result recorded</span>`
+        : (bannerParts.length > 0 ? bannerParts.join(" &ensp;&middot;&ensp; ") : "");
+
+      // ---------- Helper: render one option row ----------
+      function renderOption(o, isSelected, isMultiSelect) {
+        const isCorrect = !!o.is_correct;
+        const mark = isCorrect
+          ? `<span style="color:#1a7a4a;font-weight:800;flex-shrink:0;font-size:15px">&#10003;</span>`
+          : `<span style="color:#c00;flex-shrink:0;font-size:15px">&#10007;</span>`;
+        let bg = "rgba(0,0,0,.03)";
+        if (isSelected && isCorrect)        bg = "#d4f5e9";
+        else if (isSelected && !isCorrect)  bg = "#fff3f3";
+        else if (!isSelected && isCorrect && isMultiSelect) bg = "#fff8e1";
+        const selectedNote = isSelected
+          ? ` <span style="font-size:11px;color:rgba(0,0,0,.4);font-weight:600">(your answer)</span>`
+          : "";
+        const feedbackHtml = (o.feedback && o.feedback !== "")
+          ? `<div style="background:#f6f8f7;border-radius:7px;padding:7px 10px;margin-top:5px;font-size:13px;color:rgba(0,0,0,.6)">${escapeHtml(o.feedback)}</div>`
+          : "";
+        return `
+          <div style="padding:8px 12px;border-radius:8px;margin:3px 0;background:${bg}">
+            <div style="display:flex;align-items:baseline;gap:8px;font-size:14px">
+              ${mark}
+              <span>${escapeHtml(o.option_text)}${selectedNote}</span>
+            </div>
+            ${feedbackHtml}
+          </div>`;
+      }
+
+      // ---------- Build question cards ----------
+      const questionCards = questions.map((q, qi) => {
+        const qNum = qi + 1;
+        const ans = answersByQ[q.id] || {};
+        const sa = (ans.score_awarded !== null && ans.score_awarded !== undefined) ? Number(ans.score_awarded) : null;
+        const marks = Number(q.marks || 0);
+        const marksHtml = sa !== null
+          ? `<span style="background:#d4f5e9;color:#0b5e4e;border-radius:6px;padding:3px 9px;font-size:13px;font-weight:700">${sa} / ${marks} mark${marks !== 1 ? "s" : ""}</span>`
+          : `<span style="background:rgba(0,0,0,.06);color:rgba(0,0,0,.5);border-radius:6px;padding:3px 9px;font-size:13px;font-weight:600">${marks} mark${marks !== 1 ? "s" : ""}</span>`;
+
+        let body = "";
+
+        if (q.question_type === "MCQ" || q.question_type === "TRUE_FALSE") {
+          const opts = optionsByQ[q.id] || [];
+          let selectedId = null;
+          try { if (ans.answer_json != null && ans.answer_json !== "") selectedId = String(JSON.parse(ans.answer_json)); } catch(e) {}
+          if (!selectedId) {
+            body += `<div style="color:rgba(0,0,0,.45);font-style:italic;font-size:13px;padding:2px 0 8px">Not answered</div>`;
+          }
+          body += opts.map(o => renderOption(o, selectedId !== null && String(o.id) === selectedId, false)).join("");
+
+        } else if (q.question_type === "MULTIPLE_SELECT") {
+          const opts = optionsByQ[q.id] || [];
+          let selectedIds = new Set();
+          try {
+            if (ans.answer_json != null && ans.answer_json !== "") {
+              const p = JSON.parse(ans.answer_json);
+              const arr = Array.isArray(p) ? p : (p ? [p] : []);
+              selectedIds = new Set(arr.map(String));
+            }
+          } catch(e) {}
+          if (selectedIds.size === 0) {
+            body += `<div style="color:rgba(0,0,0,.45);font-style:italic;font-size:13px;padding:2px 0 8px">Not answered</div>`;
+          }
+          body += opts.map(o => renderOption(o, selectedIds.has(String(o.id)), true)).join("");
+
+        } else {
+          // SHORT_ANSWER / ESSAY
+          let displayText = "";
+          try {
+            if (ans.answer_json != null && ans.answer_json !== "") {
+              const p = JSON.parse(ans.answer_json);
+              displayText = typeof p === "string" ? p : String(p);
+            }
+          } catch(e) { displayText = ans.answer_json || ""; }
+          body += `
+            <div style="background:#f6f8f7;border-radius:10px;padding:12px;margin-bottom:8px">
+              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:rgba(0,0,0,.45);margin-bottom:6px">Your answer</div>
+              <div style="font-size:14px;white-space:pre-wrap;min-height:18px">${displayText ? escapeHtml(displayText) : `<span style="font-style:italic;color:rgba(0,0,0,.35)">Not answered</span>`}</div>
+            </div>`;
+          if (q.model_answer && q.model_answer !== "") {
+            body += `
+              <div style="background:#f0fff8;border:1px solid rgba(11,122,117,.15);border-radius:10px;padding:12px;margin-bottom:8px">
+                <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#0b5e4e;margin-bottom:6px">Model answer</div>
+                <div style="font-size:14px;white-space:pre-wrap">${escapeHtml(q.model_answer)}</div>
+              </div>`;
+          }
+          if (ans.teacher_note && ans.teacher_note !== "") {
+            body += `
+              <div style="background:#fffbeb;border:1px solid rgba(200,150,0,.2);border-radius:10px;padding:12px">
+                <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#7a5f0b;margin-bottom:6px">Teacher note</div>
+                <div style="font-size:14px;white-space:pre-wrap">${escapeHtml(ans.teacher_note)}</div>
+              </div>`;
+          }
+        }
+
+        // Question-level feedback (MCQ / TRUE_FALSE / MULTIPLE_SELECT)
+        if (q.question_type !== "SHORT_ANSWER" && q.question_type !== "ESSAY" &&
+            q.feedback && q.feedback !== "") {
+          body += `
+            <div style="background:#eef4fb;border:1px solid rgba(66,133,244,.15);border-radius:10px;padding:10px 12px;margin-top:10px">
+              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#2c5282;margin-bottom:4px">Feedback</div>
+              <div style="font-size:14px;color:#2d3748">${escapeHtml(q.feedback)}</div>
+            </div>`;
+        }
+
+        return `
+          <div class="card" style="margin:8px 0">
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+              <div style="font-size:13px;font-weight:700;color:rgba(0,0,0,.5);background:rgba(0,0,0,.06);padding:3px 10px;border-radius:6px">Q${qNum}</div>
+              ${marksHtml}
+            </div>
+            <div style="font-size:15px;font-weight:600;margin-bottom:10px">${escapeHtml(q.question_text)}</div>
+            ${body}
+          </div>`;
+      }).join("");
 
       return page(`
-        <div class="card">
-          <div class="topbar"><div><a href="/student">&#8592; My Exams</a></div></div>
-        </div>
-        <div class="card">
-          <h1>Review My Answers</h1>
-          <p class="muted">This feature is coming soon.</p>
-          <div class="actions" style="margin-top:16px">
-            ${attemptId
-              ? `<a href="/attempt-results?attempt_id=${escapeAttr(attemptId)}" class="btn3" style="display:inline-block;padding:10px 16px;text-decoration:none">&#8592; Back to Results</a>`
-              : `<a href="/student" class="btn3" style="display:inline-block;padding:10px 16px;text-decoration:none">&#8592; My Exams</a>`
-            }
+        <style>.review-wrap{max-width:720px;margin:0 auto}</style>
+        <div class="review-wrap">
+          <div class="card" style="margin-bottom:8px">
+            <div class="topbar">
+              <div>${backLink}</div>
+              <div style="font-size:14px;font-weight:700">${escapeHtml(exam.title)}</div>
+            </div>
+          </div>
+
+          <div class="card" style="padding:12px 16px;margin-bottom:4px">
+            <div style="font-size:14px">${scoreBanner}</div>
+          </div>
+
+          ${questionCards}
+
+          <div class="card actions" style="margin-top:4px;margin-bottom:24px">
+            <a href="/attempt-results?attempt_id=${escapeAttr(attemptId)}" class="btn3" style="display:inline-block;padding:10px 16px;text-decoration:none">&#8592; Back to Results</a>
           </div>
         </div>
       `);
