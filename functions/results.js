@@ -67,18 +67,13 @@ export async function handleResultsRequest(ctx) {
       );
       const student = await first(`SELECT name FROM users WHERE id=?`, [r.user.id]);
 
-      // Find the class this student belongs to that has exam access for this exam
+      // Find a class this student belongs to within the tenant
       const classRow = await first(
-        `SELECT DISTINCT cl.name FROM class_students cs
+        `SELECT cl.name FROM class_students cs
          JOIN classes cl ON cl.id = cs.class_id
          WHERE cs.user_id = ? AND cl.tenant_id = ?
-         AND EXISTS (
-           SELECT 1 FROM class_students cs2
-           JOIN exam_access ea ON ea.resource_type = 'CLASS' AND ea.resource_id = cs2.class_id
-           WHERE cs2.class_id = cl.id AND ea.exam_id = ?
-         )
          LIMIT 1`,
-        [r.user.id, active.tenant_id, attempt.exam_id]
+        [r.user.id, active.tenant_id]
       );
 
       // Custom field definitions and answers
