@@ -559,12 +559,12 @@ export async function handleExamRequest(ctx) {
               🔒 This exam is published — settings are locked.
             </div>
             ` : ""}
-            ${sittingForExam ? `
+            ${(sittingForExam && active.role === "TEACHER") ? `
             <div style="background:#f6f8f7;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:10px 14px;margin-bottom:8px;color:rgba(0,0,0,.55);font-size:13px">
               🔒 This exam belongs to <b>${escapeHtml(sittingForExam.sitting_title)}</b>. Settings are managed by the sitting admin.
             </div>
             ` : ""}
-            ${(locked || sittingForExam) ? `<fieldset disabled style="border:none;padding:0;margin:0">` : ""}
+            ${(locked || (sittingForExam && active.role === "TEACHER")) ? `<fieldset disabled style="border:none;padding:0;margin:0">` : ""}
 
             <div class="card">
               <div class="section-title">Basic Info</div>
@@ -670,9 +670,9 @@ export async function handleExamRequest(ctx) {
               <button type="button" class="btn3" onclick="addCustomField()" style="margin-top:4px">+ Add custom field</button>
             </div>
 
-            ${(locked || sittingForExam) ? "</fieldset>" : ""}
+            ${(locked || (sittingForExam && active.role === "TEACHER")) ? "</fieldset>" : ""}
 
-            ${(locked || sittingForExam) ? "" : `
+            ${(locked || (sittingForExam && active.role === "TEACHER")) ? "" : `
             <div class="save-bar">
               <button type="submit" class="btn2">Save settings</button>
             </div>
