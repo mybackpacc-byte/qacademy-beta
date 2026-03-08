@@ -841,7 +841,7 @@ export async function handleExamRequest(ctx) {
                 <td style="padding:6px 0">${customFields.length > 0 ? `${customFields.length} field${customFields.length !== 1 ? "s" : ""}` : '<span class="muted">None</span>'}</td>
               </tr>
             </table>
-            ${sittingForExam ? `
+            ${(sittingForExam && active.role === "TEACHER") ? `
               <div style="background:#f6f8f7;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:10px 14px;margin-top:14px;color:rgba(0,0,0,.55);font-size:13px">
                 🔒 This exam belongs to the sitting <b>${escapeHtml(sittingForExam.sitting_title)}</b>. Publishing and results release are managed by the sitting admin.
               </div>
@@ -876,7 +876,7 @@ export async function handleExamRequest(ctx) {
             ` : exam.status === "PUBLISHED" ? `
               <p style="font-size:13px;color:rgba(0,0,0,.45);margin:0 0 10px">📅 No automatic close date set</p>
             ` : ""}
-            ${sittingForExam ? `
+            ${(sittingForExam && active.role === "TEACHER") ? `
               <div style="background:#f6f8f7;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:10px 14px;color:rgba(0,0,0,.55);font-size:13px">
                 🔒 This exam belongs to the sitting <b>${escapeHtml(sittingForExam.sitting_title)}</b>. Publishing and results release are managed by the sitting admin.
               </div>
@@ -917,7 +917,7 @@ export async function handleExamRequest(ctx) {
             ` : `
               <p style="font-size:13px;color:rgba(0,0,0,.45);margin:0 0 10px">📅 Not yet released</p>
             `}
-            ${sittingForExam ? `
+            ${(sittingForExam && active.role === "TEACHER") ? `
               <div style="background:#f6f8f7;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:10px 14px;color:rgba(0,0,0,.55);font-size:13px">
                 🔒 This exam belongs to the sitting <b>${escapeHtml(sittingForExam.sitting_title)}</b>. Publishing and results release are managed by the sitting admin.
               </div>
