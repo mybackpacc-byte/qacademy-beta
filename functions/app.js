@@ -1080,6 +1080,15 @@ export async function handleAppRequest(ctx) {
         `;
       }).join("");
 
+      // Sittings for School Admin dashboard
+      const sittingsForAdmin = await all(
+        `SELECT es.id, es.title, es.academic_year, es.status,
+                (SELECT COUNT(*) FROM exam_sitting_papers esp WHERE esp.sitting_id = es.id) AS paper_count
+         FROM exam_sittings es
+         WHERE es.tenant_id=? ORDER BY es.created_at DESC`,
+        [tenantId]
+      );
+
       const rosterBlocks = [];
       for (const c of courses.filter((x) => x.status === "ACTIVE")) {
         const tRows = await all(
@@ -1280,6 +1289,36 @@ export async function handleAppRequest(ctx) {
             <textarea name="description" rows="2" placeholder="e.g. Top-set Maths group"></textarea>
             <button type="submit">Create class</button>
           </form>
+        </div>
+
+        <div class="card">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+            <h2 style="margin:0">&#128203; Exam Sittings</h2>
+            <div class="actions">
+              <a href="/sittings" class="btn3" style="display:inline-block;padding:6px 12px;text-decoration:none;font-size:13px">Manage Sittings</a>
+              <form method="post" action="/sitting-create" style="display:inline">
+                <button type="submit" class="btn2" style="padding:6px 12px;font-size:13px">+ New Sitting</button>
+              </form>
+            </div>
+          </div>
+          ${sittingsForAdmin.length === 0 ? `<p class="muted small">No sittings yet — create one to group exam papers into a formal sitting event.</p>` : `
+          <table class="table">
+            <thead><tr><th>Title</th><th>Academic Year</th><th>Status</th><th>Papers</th><th></th></tr></thead>
+            <tbody>${sittingsForAdmin.map(s => {
+              const badge = s.status === "ACTIVE"
+                ? `<span class="pill" style="background:#d4f5e9;color:#0b5e4e;font-size:11px">Active</span>`
+                : s.status === "CLOSED"
+                  ? `<span class="pill" style="background:#ffe8e8;color:#c00;font-size:11px">Closed</span>`
+                  : `<span class="pill" style="background:rgba(0,0,0,.07);color:rgba(0,0,0,.5);font-size:11px">Draft</span>`;
+              return `<tr>
+                <td><b>${escapeHtml(s.title)}</b></td>
+                <td class="small muted">${escapeHtml(s.academic_year || "—")}</td>
+                <td>${badge}</td>
+                <td class="small">${Number(s.paper_count)}</td>
+                <td><a href="/sitting-builder?sitting_id=${escapeAttr(s.id)}" class="btn3" style="display:inline-block;padding:4px 10px;text-decoration:none;font-size:12px">Open</a></td>
+              </tr>`;
+            }).join("")}</tbody>
+          </table>`}
         </div>
 
         <div class="card">
@@ -1602,10 +1641,13 @@ export async function handleAppRequest(ctx) {
       );
 
       const exams = await all(
-        `SELECT e.id, e.title, e.status, e.duration_mins, e.starts_at, e.ends_at, c.title AS course_title
+        `SELECT e.id, e.title, e.status, e.duration_mins, e.starts_at, e.ends_at,
+                c.title AS course_title, es.title AS sitting_title
          FROM exams e
          JOIN courses c ON c.id = e.course_id
          JOIN course_teachers ct ON ct.course_id = e.course_id AND ct.user_id = ?
+         LEFT JOIN exam_sitting_papers esp ON esp.exam_id = e.id
+         LEFT JOIN exam_sittings es ON es.id = esp.sitting_id
          WHERE e.tenant_id=?
          ORDER BY e.created_at DESC`,
         [r.user.id, active.tenant_id]
@@ -1620,6 +1662,7 @@ export async function handleAppRequest(ctx) {
           <td>
             <b>${escapeHtml(e.title)}</b><br/>
             <span class="muted small">${escapeHtml(e.course_title)}</span>
+            ${e.sitting_title ? `<div style="margin-top:2px"><span style="font-size:12px;color:rgba(0,0,0,.45)">&#128203; ${escapeHtml(e.sitting_title)}</span></div>` : ""}
           </td>
           <td class="small"><span class="pill">${escapeHtml(e.status)}</span></td>
           <td class="small">
@@ -1720,6 +1763,51 @@ export async function handleAppRequest(ctx) {
         if (a.status === "SUBMITTED")   attemptsByExam[a.exam_id].submitted.push(a);
         if (a.status === "IN_PROGRESS") attemptsByExam[a.exam_id].inProgress = a;
       }
+
+      // ---- My Sittings: sittings where student has at least one submitted attempt ----
+      const mySittings = await all(
+        `SELECT DISTINCT es.id, es.title, es.academic_year
+         FROM exam_sittings es
+         JOIN exam_sitting_papers esp ON esp.sitting_id = es.id
+         JOIN exam_attempts ea ON ea.exam_id = esp.exam_id
+                               AND ea.user_id = ? AND ea.status = 'SUBMITTED'
+         WHERE es.tenant_id = ?
+         ORDER BY es.created_at DESC`,
+        [userId, tenantId]
+      );
+
+      const sittingCards = [];
+      for (const s of mySittings) {
+        const totalRow = await first(
+          `SELECT COUNT(*) AS c FROM exam_sitting_papers WHERE sitting_id=?`, [s.id]
+        );
+        const releasedRow = await first(
+          `SELECT COUNT(*) AS c FROM exam_sitting_papers esp
+           JOIN exams e ON e.id = esp.exam_id
+           WHERE esp.sitting_id=? AND e.results_published_at IS NOT NULL
+             AND e.results_published_at <= ?`,
+          [s.id, new Date().toISOString()]
+        );
+        const total    = totalRow    ? Number(totalRow.c)    : 0;
+        const released = releasedRow ? Number(releasedRow.c) : 0;
+        sittingCards.push(`
+          <div class="card" style="margin-bottom:10px">
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+              <div>
+                <div style="font-size:17px;font-weight:700;margin-bottom:2px">${escapeHtml(s.title)}</div>
+                ${s.academic_year ? `<div class="muted small" style="margin-bottom:4px">${escapeHtml(s.academic_year)}</div>` : ""}
+                <div style="font-size:13px;color:rgba(0,0,0,.55)">${released} of ${total} result${total !== 1 ? "s" : ""} available</div>
+              </div>
+              <a href="/sitting-results?sitting_id=${escapeAttr(s.id)}"
+                 class="btn2" style="display:inline-block;text-decoration:none;padding:8px 16px">View Sitting Results</a>
+            </div>
+          </div>
+        `);
+      }
+
+      const mySittingsHtml = sittingCards.length > 0
+        ? `<h2 style="margin:24px 0 12px">&#128203; My Sittings</h2>${sittingCards.join("")}`
+        : "";
 
       // Build exam cards
       const cards = [];
@@ -1840,6 +1928,7 @@ export async function handleAppRequest(ctx) {
             </div>
           </div>
         </div>
+        ${mySittingsHtml}
         <h2 style="margin:24px 0 12px">My Exams</h2>
         ${examListHtml}
       `);

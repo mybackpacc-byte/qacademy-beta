@@ -331,6 +331,15 @@ export async function handleExamRequest(ctx) {
       const bands = await all(`SELECT id,label,min_percent FROM exam_grade_bands WHERE exam_id=? ORDER BY min_percent DESC`, [examId]);
       const customFields = await all(`SELECT id,field_label,field_type,field_options,is_required FROM exam_custom_fields WHERE exam_id=? ORDER BY sort_order ASC`, [examId]);
 
+      // Check if this exam belongs to a sitting (for publish-pane locking)
+      const sittingForExam = await first(
+        `SELECT esp.sitting_id, es.title AS sitting_title
+         FROM exam_sitting_papers esp
+         JOIN exam_sittings es ON es.id = esp.sitting_id
+         WHERE esp.exam_id=?`,
+        [examId]
+      );
+
       const bandRows = bands.map((b) => `
         <div class="band-row" style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
           <input name="band_label[]" value="${escapeAttr(b.label)}" placeholder="e.g. Distinction" style="flex:2" />
@@ -827,7 +836,12 @@ export async function handleExamRequest(ctx) {
                 <td style="padding:6px 0">${customFields.length > 0 ? `${customFields.length} field${customFields.length !== 1 ? "s" : ""}` : '<span class="muted">None</span>'}</td>
               </tr>
             </table>
-            ${exam.status === "DRAFT" && questions.length === 0 ? `
+            ${sittingForExam ? `
+              <div style="background:#f6f8f7;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:10px 14px;margin-top:14px;color:rgba(0,0,0,.55);font-size:13px">
+                🔒 This exam belongs to the sitting <b>${escapeHtml(sittingForExam.sitting_title)}</b>. Publishing and results release are managed by the sitting admin.
+              </div>
+              <button class="btn2" type="button" disabled style="margin-top:14px;opacity:0.45;cursor:not-allowed">🔒 Publish Exam</button>
+            ` : exam.status === "DRAFT" && questions.length === 0 ? `
               <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:10px 14px;margin-top:14px;color:#856404;font-size:13px">
                 ⚠️ Add at least one question before publishing.
               </div>
@@ -857,7 +871,12 @@ export async function handleExamRequest(ctx) {
             ` : exam.status === "PUBLISHED" ? `
               <p style="font-size:13px;color:rgba(0,0,0,.45);margin:0 0 10px">📅 No automatic close date set</p>
             ` : ""}
-            ${exam.status === "DRAFT" ? `
+            ${sittingForExam ? `
+              <div style="background:#f6f8f7;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:10px 14px;color:rgba(0,0,0,.55);font-size:13px">
+                🔒 This exam belongs to the sitting <b>${escapeHtml(sittingForExam.sitting_title)}</b>. Publishing and results release are managed by the sitting admin.
+              </div>
+              <button class="btn2" type="button" disabled style="margin-top:14px;opacity:0.45;cursor:not-allowed;background:#c00;border-color:#c00">🔒 Close Exam Now</button>
+            ` : exam.status === "DRAFT" ? `
               <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">Publish the exam first.</p>
               <button class="btn2" type="button" disabled style="background:#c00;border-color:#c00">🔒 Close Exam Now</button>
             ` : exam.status === "CLOSED" ? `
@@ -893,7 +912,12 @@ export async function handleExamRequest(ctx) {
             ` : `
               <p style="font-size:13px;color:rgba(0,0,0,.45);margin:0 0 10px">📅 Not yet released</p>
             `}
-            ${exam.status !== "CLOSED" ? `
+            ${sittingForExam ? `
+              <div style="background:#f6f8f7;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:10px 14px;color:rgba(0,0,0,.55);font-size:13px">
+                🔒 This exam belongs to the sitting <b>${escapeHtml(sittingForExam.sitting_title)}</b>. Publishing and results release are managed by the sitting admin.
+              </div>
+              <button class="btn2" type="button" disabled style="margin-top:14px;opacity:0.45;cursor:not-allowed">🔒 Release Results Now</button>
+            ` : exam.status !== "CLOSED" ? `
               <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">Close the exam first before releasing results.</p>
               <button class="btn2" type="button" disabled>🔒 Release Results Now</button>
             ` : exam.results_release_policy === "IMMEDIATE" ? `

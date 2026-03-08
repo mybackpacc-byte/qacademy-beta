@@ -7,6 +7,7 @@ import { handleExamRequest } from "./exams.js";
 import { handleQuestionBankRequest } from "./question-bank.js";
 import { handleAttemptRequest } from "./attempts.js";
 import { handleResultsRequest } from "./results.js";
+import { handleSittingRequest } from "./sittings.js";
 
 export async function onRequest(ctx) {
   const url = new URL(ctx.request.url);
@@ -24,9 +25,22 @@ export async function onRequest(ctx) {
   // Results routes
   if (
     path === "/attempt-results" ||
-    path === "/attempt-review"
+    path === "/attempt-review" ||
+    path === "/sitting-results"
   ) {
     return handleResultsRequest(ctx);
+  }
+
+  // Sittings routes (School Admin tool)
+  if (
+    path === "/sittings" ||
+    path === "/sitting-builder" ||
+    path === "/sitting-create" ||
+    path === "/sitting-save-settings" ||
+    path === "/sitting-add-paper" ||
+    path === "/sitting-remove-paper"
+  ) {
+    return handleSittingRequest(ctx);
   }
 
   // Question bank routes

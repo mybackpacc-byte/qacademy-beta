@@ -520,6 +520,128 @@ export async function handleResultsRequest(ctx) {
       `);
     }
 
+    // ----------------------------------------------------------------
+    // GET /sitting-results
+    // ----------------------------------------------------------------
+    if (path === "/sitting-results" && request.method === "GET") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active || active.role !== "STUDENT") return redirect("/student");
+      const tenantId = active.tenant_id;
+
+      const sittingId = url.searchParams.get("sitting_id") || "";
+      if (!sittingId) return redirect("/student");
+
+      const sitting = await first(
+        `SELECT * FROM exam_sittings WHERE id=? AND tenant_id=?`,
+        [sittingId, tenantId]
+      );
+      if (!sitting) return redirect("/student");
+
+      // Load papers in sitting order
+      const papers = await all(
+        `SELECT esp.exam_id, esp.sort_order,
+                e.title, e.score_display, e.results_published_at, e.status AS exam_status
+         FROM exam_sitting_papers esp
+         JOIN exams e ON e.id=esp.exam_id
+         WHERE esp.sitting_id=?
+         ORDER BY esp.sort_order`,
+        [sittingId]
+      );
+
+      if (papers.length === 0) return redirect("/student");
+      const examIds = papers.map(p => p.exam_id);
+
+      // Load student's latest submitted attempt per exam
+      const placeholders = examIds.map(() => "?").join(",");
+      const attempts = await all(
+        `SELECT * FROM exam_attempts
+         WHERE user_id=? AND tenant_id=? AND status='SUBMITTED'
+           AND exam_id IN (${placeholders})
+         ORDER BY submitted_at DESC`,
+        [r.user.id, tenantId, ...examIds]
+      );
+
+      // Guard: student must have at least one attempt in this sitting
+      if (attempts.length === 0) return redirect("/student");
+
+      // Map: exam_id → earliest/latest attempt (first match = most recent due to ORDER BY DESC)
+      const attemptByExam = {};
+      for (const a of attempts) {
+        if (!attemptByExam[a.exam_id]) attemptByExam[a.exam_id] = a;
+      }
+
+      // Render a card per paper
+      const paperCards = papers.map((p, idx) => {
+        const attempt = attemptByExam[p.exam_id] || null;
+        const released = p.results_published_at && Date.parse(p.results_published_at) <= Date.now();
+        const sd = p.score_display || "BOTH";
+
+        let scoreHtml = "";
+        if (!attempt) {
+          scoreHtml = `<span class="muted">No submission</span>`;
+        } else if (!released) {
+          scoreHtml = `<span class="pill badge-draft">Pending</span>`;
+        } else if (sd === "HIDDEN" || sd === "NONE") {
+          scoreHtml = `<span class="muted">Score hidden</span>`;
+        } else if (sd === "PASS_FAIL") {
+          const passed = attempt.pass_fail === "PASS";
+          scoreHtml = `<span class="pill ${passed ? "badge-published" : "badge-closed"}">${passed ? "Pass" : "Fail"}</span>`;
+        } else {
+          const parts = [];
+          if (sd === "MARKS" || sd === "BOTH") {
+            parts.push(`<strong>${attempt.score_raw ?? "—"}/${attempt.score_max ?? "—"}</strong>`);
+          }
+          if (sd === "PERCENT" || sd === "BOTH") {
+            const pct = attempt.score_pct != null ? Math.round(attempt.score_pct) + "%" : "—%";
+            parts.push(`<strong>${pct}</strong>`);
+          }
+          scoreHtml = parts.join(" &nbsp;·&nbsp; ");
+        }
+
+        const viewLink = attempt && released
+          ? `<a href="/attempt-results?attempt_id=${escapeAttr(attempt.id)}" class="btn3" style="padding:6px 12px;text-decoration:none;font-size:13px">View →</a>`
+          : "";
+
+        return `
+          <div class="card" style="margin:8px 0;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+            <div>
+              <div style="font-size:12px;font-weight:700;color:rgba(0,0,0,.4);margin-bottom:3px">Paper ${idx + 1}</div>
+              <div style="font-size:15px;font-weight:600">${escapeHtml(p.title)}</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:12px">
+              <div style="font-size:15px">${scoreHtml}</div>
+              ${viewLink}
+            </div>
+          </div>`;
+      }).join("");
+
+      return page(`
+        <div style="max-width:720px;margin:0 auto">
+          <div class="card" style="margin-bottom:8px">
+            <div class="topbar">
+              <div><a href="/student">← My Sittings</a></div>
+              <div style="font-size:14px;font-weight:700">${escapeHtml(sitting.title)}</div>
+            </div>
+          </div>
+
+          ${sitting.academic_year || sitting.description ? `
+            <div class="card" style="padding:12px 16px;margin-bottom:8px">
+              ${sitting.academic_year ? `<div style="font-size:13px;color:rgba(0,0,0,.45)">Academic year: ${escapeHtml(sitting.academic_year)}</div>` : ""}
+              ${sitting.description ? `<div style="font-size:13px;margin-top:4px">${escapeHtml(sitting.description)}</div>` : ""}
+            </div>
+          ` : ""}
+
+          ${paperCards}
+
+          <div class="card actions" style="margin-top:4px;margin-bottom:24px">
+            <a href="/student" class="btn3" style="display:inline-block;padding:10px 16px;text-decoration:none">← Back to My Sittings</a>
+          </div>
+        </div>
+      `);
+    }
+
     // Fallback
     return redirect("/student");
 
