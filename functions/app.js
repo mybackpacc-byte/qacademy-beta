@@ -1687,14 +1687,14 @@ export async function handleAppRequest(ctx) {
       if (!active) return redirect("/choose-school");
       if (active.role !== "STUDENT") return redirect("/");
 
-      const userId = r.user.id;
+      const userId   = r.user.id;
       const tenantId = active.tenant_id;
-      const now = Date.now();
+      const now      = Date.now();
 
-      // Load all exams this student has access to, with custom field count
+      // Load all exams this student has access to (includes results_published_at)
       const exams = await all(
         `SELECT e.id AS exam_id, e.title, e.status, e.duration_mins, e.max_attempts,
-                e.starts_at, e.ends_at, e.exam_password,
+                e.starts_at, e.ends_at, e.exam_password, e.results_published_at,
                 c.title AS course_title,
                 (SELECT COUNT(*) FROM exam_custom_fields cf WHERE cf.exam_id = e.id) AS cf_count
          FROM exam_access ea
@@ -1705,57 +1705,91 @@ export async function handleAppRequest(ctx) {
         [userId, tenantId]
       );
 
-      // Load attempt counts per exam (non-abandoned)
-      const attemptRows = await all(
-        `SELECT exam_id, COUNT(*) AS attempt_count
+      // Load all non-abandoned attempts (full rows, not just counts)
+      const allAttempts = await all(
+        `SELECT id, exam_id, status, attempt_no, submitted_at
          FROM exam_attempts
          WHERE user_id = ? AND tenant_id = ? AND status != 'ABANDONED'
-         GROUP BY exam_id`,
+         ORDER BY attempt_no ASC`,
         [userId, tenantId]
       );
-      const attemptMap = {};
-      for (const a of attemptRows) attemptMap[a.exam_id] = a.attempt_count;
+      const attemptsByExam = {};
+      for (const a of allAttempts) {
+        if (!attemptsByExam[a.exam_id]) attemptsByExam[a.exam_id] = { all: [], submitted: [], inProgress: null };
+        attemptsByExam[a.exam_id].all.push(a);
+        if (a.status === "SUBMITTED")   attemptsByExam[a.exam_id].submitted.push(a);
+        if (a.status === "IN_PROGRESS") attemptsByExam[a.exam_id].inProgress = a;
+      }
 
       // Build exam cards
       const cards = [];
       for (const exam of exams) {
         if (exam.status === "DRAFT") continue;
 
-        const attemptsUsed      = attemptMap[exam.exam_id] || 0;
+        const examAtts          = attemptsByExam[exam.exam_id] || { all: [], submitted: [], inProgress: null };
+        const attemptsUsed      = examAtts.all.length;
         const attemptsRemaining = Math.max(0, exam.max_attempts - attemptsUsed);
+        const inProgress        = examAtts.inProgress;
+        const submitted         = examAtts.submitted;
         const startsInFuture    = exam.starts_at && Date.parse(exam.starts_at) > now;
         const endsInPast        = exam.ends_at   && Date.parse(exam.ends_at)   < now;
+        const resultsReleased   = isIsoInPast(exam.results_published_at);
 
-        let badgeClass = "";
-        let badgeLabel = "";
-        let actionHtml = "";
-
+        // Badge
+        let badgeClass = "", badgeLabel = "";
         if (exam.status === "PUBLISHED") {
           if (startsInFuture) {
-            badgeClass = "badge-upcoming";
-            badgeLabel = "Upcoming";
+            badgeClass = "badge-upcoming";    badgeLabel = "Upcoming";
           } else if (endsInPast) {
-            badgeClass = "badge-exam-closed";
-            badgeLabel = "Closed";
-          } else if (attemptsRemaining > 0) {
-            badgeClass = "badge-open";
-            badgeLabel = "Open";
-            actionHtml = `<a href="/attempt-start?exam_id=${escapeAttr(exam.exam_id)}" class="btn2" style="display:inline-block;text-decoration:none;padding:8px 16px">Start Exam</a>`;
+            badgeClass = "badge-exam-closed"; badgeLabel = "Closed";
+          } else if (inProgress || attemptsRemaining > 0) {
+            badgeClass = "badge-open";        badgeLabel = "Open";
           } else {
-            badgeClass = "badge-completed";
-            badgeLabel = "Completed";
-            actionHtml = `<button class="btn2" type="button" disabled style="opacity:0.45;cursor:not-allowed">View Results</button>`;
+            badgeClass = "badge-completed";   badgeLabel = "Completed";
           }
         } else if (exam.status === "CLOSED") {
           if (attemptsUsed === 0) {
-            badgeClass = "badge-exam-closed";
-            badgeLabel = "Closed";
+            badgeClass = "badge-exam-closed"; badgeLabel = "Closed";
           } else {
-            badgeClass = "badge-completed";
-            badgeLabel = "Completed";
-            actionHtml = `<button class="btn2" type="button" disabled style="opacity:0.45;cursor:not-allowed">View Results</button>`;
+            badgeClass = "badge-completed";   badgeLabel = "Completed";
           }
         }
+
+        // Helper: build View Results button(s) for a list of submitted attempts
+        const viewResultsHtml = (attempts) => {
+          if (attempts.length === 0) return "";
+          if (attempts.length === 1) {
+            const a = attempts[0];
+            return resultsReleased
+              ? `<a href="/attempt-results?attempt_id=${escapeAttr(a.id)}" class="btn2" style="display:inline-block;text-decoration:none;padding:8px 16px">View Results</a>`
+              : `<button class="btn2" type="button" disabled style="opacity:0.45;cursor:not-allowed" title="Results not yet released">View Results</button>`;
+          }
+          // Multiple submitted attempts — one small button each
+          const btns = attempts.map(a =>
+            resultsReleased
+              ? `<a href="/attempt-results?attempt_id=${escapeAttr(a.id)}" class="btn2" style="display:inline-block;text-decoration:none;padding:6px 12px;font-size:13px">Attempt ${a.attempt_no}</a>`
+              : `<button class="btn2" type="button" disabled style="opacity:0.45;cursor:not-allowed;padding:6px 12px;font-size:13px" title="Results not yet released">Attempt ${a.attempt_no}</button>`
+          ).join("");
+          return `<div style="display:flex;flex-wrap:wrap;gap:6px">${btns}</div>`;
+        };
+
+        // Action buttons — evaluated in priority order
+        let actionHtml = "";
+        if (inProgress) {
+          // Case 1: resume the in-progress attempt
+          actionHtml = `<a href="/attempt-take?attempt_id=${escapeAttr(inProgress.id)}" class="btn2" style="display:inline-block;text-decoration:none;padding:8px 16px">Resume Exam</a>`;
+        } else if (attemptsRemaining > 0) {
+          // Case 2: can start new attempt + show prior results (if any)
+          const startBtn  = `<a href="/attempt-start?exam_id=${escapeAttr(exam.exam_id)}" class="btn2" style="display:inline-block;text-decoration:none;padding:8px 16px">Start Exam</a>`;
+          const viewBtns  = viewResultsHtml(submitted);
+          actionHtml = viewBtns
+            ? `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px">${startBtn}${viewBtns}</div>`
+            : startBtn;
+        } else if (submitted.length > 0) {
+          // Case 3: no attempts remaining — show results only
+          actionHtml = viewResultsHtml(submitted);
+        }
+        // Case 4: no attempts + none remaining → actionHtml stays ""
 
         cards.push(`
           <div class="card" style="margin-bottom:12px">
