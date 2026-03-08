@@ -1,4 +1,3 @@
-
 # QAcademy Beta — Project Summary
 *This document is for Claude's Project Knowledge. It summarises everything built so far, the tech stack, decisions made, and what comes next.*
 
@@ -54,7 +53,7 @@ functions/
   exams.js          → Exam builder routes + teacher results pane + grading screen
   question-bank.js  → Question bank routes
   attempts.js       → Exam taking engine routes (student)
-  results.js        → Student results page, review page (future), sitting results (future)
+  results.js        → Student results page, review page, sitting results (future)
 
 db/
   schema.sql        → Reference schema — run once in D1 for a fresh clone
@@ -348,14 +347,45 @@ Runs immediately on submit inside `POST /attempt-take`:
 
 ---
 
-## ⏳ What Comes Next (In Order)
+## 🔍 Student Review Page — COMPLETE (`results.js`)
 
-### Phase 6 — Student Review Page
-- [ ] `GET /attempt-review?attempt_id=X`
-- [ ] Only accessible if `allow_review = 1` AND results released
-- [ ] Shows all questions in `question_order_json` order (the order student saw them)
-- [ ] Student's answer, correct answer, marks awarded per question
-- [ ] Read only — no editing
+### Route: `GET /attempt-review?attempt_id=X`
+
+- Only accessible if `allow_review = 1` on the exam AND `results_published_at` is set and in the past
+- If either condition fails → clean meaningful message shown, no content exposed
+- Access is enforced server-side — students cannot bypass by visiting the URL directly
+- Review button only appears on results page if `allow_review = 1` — defence in depth
+
+### Page layout
+1. **Top bar** — back arrow to `/attempt-results?attempt_id=X`, exam title
+2. **Mini score banner** — compact score/grade/pass-fail respecting `score_display` from `exam_attempts`
+3. **Questions** — one card per question, in `question_order_json` order (the order the student actually saw them), numbered Q1, Q2 etc. Marks awarded shown top-right of each card.
+
+### Per question type
+
+**MCQ / TRUE_FALSE / MULTIPLE_SELECT:**
+- All options listed
+- Green tick = correct option; Red cross = incorrect option
+- Student's chosen option(s) highlighted
+- Amber highlight for correct options the student missed (MULTIPLE_SELECT)
+- Option-level `feedback` shown below each option — only if not empty
+- Question-level `feedback` shown at bottom of card in soft blue/grey box — only if not empty
+
+**SHORT_ANSWER / ESSAY:**
+- Student's answer in a light grey box labelled "Your answer"
+- `model_answer` shown in a soft green box labelled "Model answer" — only if not empty
+- `teacher_note` from `exam_answers` shown in a yellow box labelled "Teacher note" — only if not empty
+- Marks awarded shown clearly
+
+### Design decisions
+- No student name or personal details on the page — it is a learning tool, not an official document
+- Print version with student name deferred — can be added later if needed
+- All feedback boxes only render when content exists — no empty labels
+- Read only — no forms, no inputs
+
+---
+
+## ⏳ What Comes Next (In Order)
 
 ### Phase 8 — Sittings (School Admin)
 - [ ] Create sittings, assign papers
@@ -370,7 +400,7 @@ Runs immediately on submit inside `POST /attempt-take`:
 - **exam_access extension** — add `access_source` (CLASS/COURSE/INDIVIDUAL) and `source_id` columns to track how each student was granted access. Enables accurate class display on result slip and clean removal of access by class.
 - **Anti-cheat / proctoring** — Page Visibility API to detect tab switching, Fullscreen API enforcement, violation log on `exam_attempts` as `violations_json`, configurable auto-submit after X violations, teacher sees violation summary in results pane
 - **question_display setting** — add `ONE_AT_A_TIME | ALL` to exam settings for teacher to override FREE mode display. New column on `exams` table, snapshot onto `exam_attempts`.
-- **Student review page** — shows questions in `question_order_json` order (student's experience), gated behind `allow_review = 1` and results released
+- **Printable review page** — student name shown only in `@media print`, hidden on screen
 - **Printable marksheet** — teacher prints grading screen as official marksheet, questions in `sort_order`
 
 ### Phase 2 — Auth Improvements (Deferred)
@@ -406,6 +436,7 @@ Runs immediately on submit inside `POST /attempt-take`:
 - **Teacher always sees full scores** — `score_display` setting only affects what students see
 - **New columns before new tables** — always consider adding columns to existing tables before creating new ones
 - **recalcAttempt lives in shared.js** — used by both auto grading (attempts.js) and manual grading (exams.js)
+- **Review page is a learning tool** — no personal details shown on screen; print version with name deferred
 - When doing a full rewrite of all files, always verify actual D1 column names match code before deploying
 
 ---
@@ -431,4 +462,4 @@ APP_SECRET   → pepper for password hashing (set in Cloudflare Pages settings)
 
 ---
 
-*Last updated: 2026-03-08. Exam taking engine complete. Auto grading complete. Teacher results pane and manual grading screen complete. Student results page complete. Student dashboard button logic updated (Resume/Start/View Results per attempt). Next: Student Review Page (Phase 6).*
+*Last updated: 2026-03-08. Exam taking engine complete. Auto grading complete. Teacher results pane and manual grading screen complete. Student results page complete. Student review page complete (Phase 6). Next: Sittings (Phase 8).*
