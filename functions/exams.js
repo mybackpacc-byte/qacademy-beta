@@ -1239,8 +1239,8 @@ export async function handleExamRequest(ctx) {
       if (!active || (active.role !== "TEACHER" && active.role !== "SCHOOL_ADMIN")) return redirect("/");
 
       const attemptId = url.searchParams.get("attempt_id") || "";
-      const examId = url.searchParams.get("exam_id") || "";
-      const viewOnly = url.searchParams.get("view") === "1";
+      const examId    = url.searchParams.get("exam_id")    || "";
+      const viewOnly  = url.searchParams.get("view") === "1";
       if (!attemptId || !examId) return redirect("/teacher");
 
       const exam = await verifyExamAccess(examId, active.tenant_id, r.user.id, active.role);
@@ -1255,125 +1255,311 @@ export async function handleExamRequest(ctx) {
       );
       if (!attempt) return redirect(`/exam-builder?exam_id=${examId}&pane=results`);
 
-      const manualQuestions = await all(
-        `SELECT id, question_type, question_text, marks, sort_order, model_answer
-         FROM exam_questions
-         WHERE exam_id=? AND tenant_id=? AND (question_type='SHORT_ANSWER' OR question_type='ESSAY')
-         ORDER BY sort_order ASC`,
+      const fmtSecs = (secs) => {
+        if (secs === null || secs === undefined) return "—";
+        const s = Number(secs);
+        const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+        if (h > 0) return `${h}h ${m}m`;
+        if (m > 0) return `${m}m ${sec}s`;
+        return `${sec}s`;
+      };
+
+      // Load ALL questions in design (sort_order) order
+      const questions = await all(
+        `SELECT id, question_type, question_text, marks, sort_order, partial_marking, model_answer
+         FROM exam_questions WHERE exam_id=? AND tenant_id=? ORDER BY sort_order ASC`,
         [examId, active.tenant_id]
       );
 
-      const answers = await all(
-        `SELECT a.question_id, a.answer_json, a.score_awarded, a.teacher_note, a.graded_by, a.graded_at,
-                gb.name AS graded_by_name
+      // Load ALL options for all questions
+      const optionsByQ = {};
+      if (questions.length > 0) {
+        const ph = questions.map(() => "?").join(",");
+        const optRows = await all(
+          `SELECT id, question_id, option_text, is_correct, sort_order
+           FROM exam_question_options WHERE question_id IN (${ph}) ORDER BY sort_order ASC`,
+          questions.map(q => q.id)
+        );
+        for (const o of optRows) {
+          if (!optionsByQ[o.question_id]) optionsByQ[o.question_id] = [];
+          optionsByQ[o.question_id].push(o);
+        }
+      }
+
+      // Load ALL answers with grader name
+      const answRows = await all(
+        `SELECT a.question_id, a.answer_json, a.score_awarded, a.teacher_note,
+                a.graded_by, a.graded_at, gb.name AS graded_by_name
          FROM exam_answers a
          LEFT JOIN users gb ON gb.id = a.graded_by
          WHERE a.attempt_id=?`,
         [attemptId]
       );
       const answersByQ = {};
-      for (const a of answers) answersByQ[a.question_id] = a;
+      for (const a of answRows) answersByQ[a.question_id] = a;
 
-      const fmtSecs = (secs) => {
-        if (secs === null || secs === undefined) return "—";
-        const s = Number(secs);
-        const h = Math.floor(s / 3600);
-        const m = Math.floor((s % 3600) / 60);
-        const sec = s % 60;
-        if (h > 0) return `${h}h ${m}m`;
-        if (m > 0) return `${m}m ${sec}s`;
-        return `${sec}s`;
-      };
+      // Compute score totals
+      const manualTypes = new Set(["SHORT_ANSWER", "ESSAY"]);
+      let baseScore = 0, scoreTotalAll = 0;
+      for (const q of questions) {
+        scoreTotalAll += Number(q.marks || 0);
+        if (!manualTypes.has(q.question_type)) {
+          const a = answersByQ[q.id];
+          if (a && a.score_awarded !== null && a.score_awarded !== undefined)
+            baseScore += Number(a.score_awarded);
+        }
+      }
+      const manualQs = questions.filter(q => manualTypes.has(q.question_type));
+      let initialManualScore = 0;
+      for (const q of manualQs) {
+        const a = answersByQ[q.id];
+        if (a && a.score_awarded !== null && a.score_awarded !== undefined)
+          initialManualScore += Number(a.score_awarded);
+      }
+      const initialScore  = baseScore + initialManualScore;
+      const ungradedManual = manualQs.filter(q => {
+        const a = answersByQ[q.id];
+        return !a || a.score_awarded === null || a.score_awarded === undefined;
+      });
+      const initPct = scoreTotalAll > 0 ? Math.round(initialScore / scoreTotalAll * 10000) / 100 : 0;
 
-      const scoreStr = attempt.score_raw !== null && attempt.score_raw !== undefined
-        ? `${Number(attempt.score_raw)} / ${Number(attempt.score_total)} (${Number(attempt.score_pct)}%)`
-        : "Not yet calculated";
+      // Question number map
+      const qNumMap = {};
+      questions.forEach((q, i) => { qNumMap[q.id] = i + 1; });
 
-      const disabled = viewOnly ? "disabled" : "";
-
-      const questionCards = manualQuestions.map((q) => {
-        const ans = answersByQ[q.id] || {};
-        const studentAnswer = ans.answer_json || "";
-        const scoreVal = ans.score_awarded !== null && ans.score_awarded !== undefined ? Number(ans.score_awarded) : "";
-        const teacherNote = ans.teacher_note || "";
-        const gradedByName = ans.graded_by_name || "";
-        const gradedAt = ans.graded_at || "";
-        return `
-          <div class="card" style="margin:8px 0">
-            <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;margin-bottom:8px">
-              <span class="pill" style="font-size:11px">${escapeHtml(qTypeLabel(q.question_type))}</span>
-              <span class="muted small">${escapeHtml(String(q.marks))} mark${Number(q.marks) !== 1 ? "s" : ""}</span>
-            </div>
-            <div style="font-size:15px;font-weight:600;margin-bottom:12px">${escapeHtml(q.question_text)}</div>
-            <div style="background:#f6f8f7;border-radius:10px;padding:12px;margin-bottom:10px">
-              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:rgba(0,0,0,.45);margin-bottom:6px">Student's Answer</div>
-              <div style="font-size:14px;white-space:pre-wrap">${escapeHtml(studentAnswer)}</div>
-            </div>
-            ${q.model_answer ? `
-            <details style="margin-bottom:10px">
-              <summary style="cursor:pointer;font-size:13px;color:rgba(0,0,0,.5);font-weight:600">Show model answer</summary>
-              <div style="background:#f0fff8;border-radius:10px;padding:10px;margin-top:6px;font-size:14px;white-space:pre-wrap">${escapeHtml(q.model_answer)}</div>
-            </details>` : ""}
-            <div class="row" style="margin-bottom:8px">
-              <div>
-                <label>Score awarded (max ${escapeHtml(String(q.marks))})</label>
-                <input type="number" name="score_${escapeAttr(q.id)}" value="${scoreVal !== "" ? escapeAttr(String(scoreVal)) : ""}"
-                       min="0" max="${escapeAttr(String(q.marks))}" step="0.5" style="max-width:140px" ${disabled} />
-              </div>
-            </div>
-            <div>
-              <label>Teacher note (optional)</label>
-              <textarea name="note_${escapeAttr(q.id)}" rows="2" style="resize:vertical" ${disabled}>${escapeHtml(teacherNote)}</textarea>
-            </div>
-            ${gradedByName ? `
-            <div style="margin-top:8px;font-size:12px;color:rgba(0,0,0,.45)">
-              Last graded by ${escapeHtml(gradedByName)}${gradedAt ? " on " + fmtISO(gradedAt) : ""}
-            </div>` : ""}
-          </div>
-        `;
+      // Sidebar items (same HTML reused in desktop sidebar and mobile drawer)
+      const sidebarItems = manualQs.map(q => {
+        const a = answersByQ[q.id];
+        const ungraded = !a || a.score_awarded === null || a.score_awarded === undefined;
+        const hidden   = !viewOnly && !ungraded;
+        return `<div data-sidebar-q="${escapeAttr(q.id)}" style="${hidden ? "display:none;" : ""}padding:6px 8px;border-radius:8px;cursor:pointer;font-size:13px;background:rgba(11,122,117,.07);margin:3px 0" onclick="scrollToQ('${escapeAttr(q.id)}')"><span style="font-weight:700">Q${qNumMap[q.id]}</span> — ${escapeHtml(qTypeLabel(q.question_type))}</div>`;
       }).join("");
 
+      const allDoneInit = !viewOnly && manualQs.length > 0 && ungradedManual.length === 0;
+      const noManualInit = manualQs.length === 0;
+
+      // Helper: render option rows with colour highlighting
+      const renderOptions = (opts, selectedSet) =>
+        opts.map(o => {
+          const sel = selectedSet.has(String(o.id));
+          const cor = !!o.is_correct;
+          let bg = "rgba(0,0,0,.03)", badge = "", note = "";
+          if (sel && cor)  { bg = "#d4f5e9"; badge = `<span style="margin-left:6px">✅</span>`; }
+          else if (sel)    { bg = "#fff3f3"; badge = `<span style="margin-left:6px">❌</span>`; }
+          else if (cor)    { bg = "#fff8e1"; note  = `<span class="muted small" style="margin-left:6px">(correct answer)</span>`; }
+          return `<div style="padding:8px 12px;border-radius:8px;margin:4px 0;font-size:14px;background:${bg}">${escapeHtml(o.option_text)}${badge}${note}</div>`;
+        }).join("");
+
+      // Build one card per question
+      const questionCards = questions.map((q, qi) => {
+        const qNum = qi + 1;
+        const ans  = answersByQ[q.id] || {};
+        const opts = optionsByQ[q.id] || [];
+        const sa   = (ans.score_awarded !== null && ans.score_awarded !== undefined) ? Number(ans.score_awarded) : null;
+        const scorePill = sa !== null
+          ? `<span class="pill" style="font-size:12px;background:#d4f5e9;color:#0b5e4e">${sa} / ${escapeHtml(String(q.marks))}</span>`
+          : `<span class="pill" style="font-size:12px;background:rgba(0,0,0,.07);color:rgba(0,0,0,.5)">${escapeHtml(String(q.marks))} mark${Number(q.marks) !== 1 ? "s" : ""}</span>`;
+
+        let body = "";
+        if (q.question_type === "MCQ" || q.question_type === "TRUE_FALSE") {
+          let sel = null;
+          try { if (ans.answer_json != null && ans.answer_json !== "") sel = JSON.parse(ans.answer_json); } catch(e) {}
+          body = sel === null
+            ? `<div style="color:rgba(0,0,0,.45);font-style:italic;font-size:14px;padding:4px 0">Not answered</div>`
+            : renderOptions(opts, new Set([String(sel)]));
+
+        } else if (q.question_type === "MULTIPLE_SELECT") {
+          let ids = [];
+          try {
+            if (ans.answer_json != null && ans.answer_json !== "") {
+              const p = JSON.parse(ans.answer_json);
+              ids = Array.isArray(p) ? p.map(String) : (p ? [String(p)] : []);
+            }
+          } catch(e) {}
+          body = ids.length === 0
+            ? `<div style="color:rgba(0,0,0,.45);font-style:italic;font-size:14px;padding:4px 0">Not answered</div>`
+            : renderOptions(opts, new Set(ids));
+
+        } else {
+          // SHORT_ANSWER / ESSAY
+          const studentAns = ans.answer_json || "";
+          const scoreVal   = sa !== null ? String(sa) : "";
+          const noteVal    = ans.teacher_note || "";
+          const dis        = viewOnly ? "disabled" : "";
+          const rows       = q.question_type === "ESSAY" ? 6 : 3;
+          const gradedLine = ans.graded_by_name
+            ? `<div style="margin-top:8px;font-size:12px;color:rgba(0,0,0,.45)">Graded by ${escapeHtml(ans.graded_by_name)}${ans.graded_at ? " on " + fmtISO(ans.graded_at) : ""}</div>`
+            : "";
+          body = `
+            <div style="background:#f6f8f7;border-radius:10px;padding:12px;margin-bottom:10px">
+              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:rgba(0,0,0,.45);margin-bottom:6px">Student's Answer</div>
+              <div style="font-size:14px;white-space:pre-wrap;min-height:18px">${escapeHtml(studentAns)}</div>
+            </div>
+            ${q.model_answer ? `<details style="margin-bottom:10px"><summary style="cursor:pointer;font-size:13px;color:rgba(0,0,0,.5);font-weight:600">Show model answer</summary><div style="background:#f0fff8;border-radius:10px;padding:10px;margin-top:6px;font-size:14px;white-space:pre-wrap">${escapeHtml(q.model_answer)}</div></details>` : ""}
+            <div style="margin-bottom:8px">
+              <label>Score awarded <span class="muted">(max ${escapeHtml(String(q.marks))})</span></label>
+              <input type="number" name="score_${escapeAttr(q.id)}" value="${escapeAttr(scoreVal)}"
+                     min="0" max="${escapeAttr(String(q.marks))}" step="0.5" style="max-width:140px"
+                     class="manual-score-input" data-qid="${escapeAttr(q.id)}"
+                     oninput="onScoreInput('${escapeAttr(q.id)}',this)" ${dis} />
+            </div>
+            <div>
+              <label>Teacher note <span class="muted">(optional)</span></label>
+              <textarea name="note_${escapeAttr(q.id)}" rows="${rows}" style="resize:vertical" ${dis}>${escapeHtml(noteVal)}</textarea>
+            </div>
+            ${gradedLine}`;
+        }
+
+        return `
+        <div class="card" id="q-${escapeAttr(q.id)}" style="margin:8px 0;scroll-margin-top:16px">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <span style="font-size:12px;color:rgba(0,0,0,.45);font-weight:700;background:rgba(0,0,0,.06);padding:3px 8px;border-radius:6px">Q${qNum}</span>
+              <span class="pill" style="font-size:11px">${escapeHtml(qTypeLabel(q.question_type))}</span>
+            </div>
+            ${scorePill}
+          </div>
+          <div style="font-size:15px;font-weight:600;margin-bottom:12px">${escapeHtml(q.question_text)}</div>
+          ${body}
+        </div>`;
+      }).join("");
+
+      // Wrap questions in form (or not for view-only)
       const formWrap = viewOnly
         ? questionCards
         : `<form method="post" action="/exam-grade">
             <input type="hidden" name="attempt_id" value="${escapeAttr(attemptId)}" />
-            <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
+            <input type="hidden" name="exam_id"    value="${escapeAttr(examId)}" />
             ${questionCards}
             <div class="card" style="padding:12px 16px">
               <div class="actions">
-                <button class="btn2" type="submit">Save grades</button>
+                <button class="btn2" type="submit">Save Grades</button>
                 <a href="/exam-builder?exam_id=${escapeAttr(examId)}&pane=results" class="btn3" style="text-decoration:none">Cancel</a>
               </div>
             </div>
           </form>`;
 
       return page(`
-        <div class="card">
-          <div style="font-size:12px;color:rgba(0,0,0,.45);margin-bottom:4px">
-            <a href="/exam-builder?exam_id=${escapeAttr(examId)}&pane=results">← Back to results</a>
-          </div>
-          <h1 style="margin:0 0 4px">${viewOnly ? "View submission" : "Grade submission"}</h1>
-          <div class="muted small">${escapeHtml(exam.title)}</div>
-        </div>
+        <style>
+          .gl{display:grid;grid-template-columns:1fr 220px;gap:16px;align-items:start}
+          .gl-side{position:sticky;top:16px}
+          #mob-fab{display:none}
+          #mob-ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:40}
+          #mob-dr{position:fixed;bottom:0;left:0;right:0;background:#fff;border-radius:16px 16px 0 0;padding:16px;z-index:50;transform:translateY(100%);transition:transform .25s ease;max-height:60vh;overflow-y:auto}
+          @media(max-width:768px){.gl{grid-template-columns:1fr}.gl-side{display:none}#mob-fab{display:block;position:fixed;bottom:20px;right:16px;z-index:30;padding:10px 16px;border:0;border-radius:999px;background:#0b7a75;color:#fff;font-weight:700;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.22);font-size:14px}}
+        </style>
 
-        ${viewOnly ? `<div style="background:#e8f4fd;border:1px solid #90caf9;border-radius:10px;padding:10px 14px;margin-bottom:8px;font-size:13px;color:#1565c0">Read-only view — this submission is already fully graded.</div>` : ""}
-
-        <div class="card">
-          <div class="row">
-            <div><label style="margin:0 0 2px">Student</label><div style="font-weight:600">${escapeHtml(attempt.student_name)}</div></div>
-            <div><label style="margin:0 0 2px">Attempt #</label><div>${attempt.attempt_no}</div></div>
-            <div><label style="margin:0 0 2px">Submitted</label><div>${attempt.submitted_at ? fmtISO(attempt.submitted_at) : "—"}</div></div>
-            <div><label style="margin:0 0 2px">Time taken</label><div>${fmtSecs(attempt.time_taken_secs)}</div></div>
-          </div>
-          <div style="margin-top:12px;padding:10px;background:#f6f8f7;border-radius:10px;font-size:13px">
-            Auto-graded score so far: <b>${scoreStr}</b>
+        <div class="card" style="margin-bottom:8px">
+          <div style="font-size:12px;color:rgba(0,0,0,.45);margin-bottom:4px"><a href="/exam-builder?exam_id=${escapeAttr(examId)}&pane=results">← Back to Results</a></div>
+          <div style="display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:8px">
+            <h1 style="margin:0">${viewOnly ? "View Submission" : "Grade Submission"}</h1>
+            <span class="muted small">${escapeHtml(exam.title)}</span>
           </div>
         </div>
 
-        ${manualQuestions.length === 0
-          ? `<div class="card"><p class="muted">No manually-graded questions in this exam.</p></div>`
-          : formWrap
-        }
+        ${viewOnly ? `<div style="background:#e8f4fd;border:1px solid #90caf9;border-radius:10px;padding:10px 14px;margin-bottom:8px;font-size:13px;color:#1565c0;font-weight:600">This attempt is fully graded — view only</div>` : ""}
+
+        <div class="gl">
+          <div>
+            <div class="card" style="margin-bottom:8px">
+              <div class="row" style="margin-bottom:12px">
+                <div><div class="muted small" style="margin-bottom:2px">Student</div><div style="font-weight:600">${escapeHtml(attempt.student_name)}</div></div>
+                <div><div class="muted small" style="margin-bottom:2px">Attempt</div><div>#${attempt.attempt_no}</div></div>
+                <div><div class="muted small" style="margin-bottom:2px">Submitted</div><div>${attempt.submitted_at ? fmtISO(attempt.submitted_at) : "—"}</div></div>
+                <div><div class="muted small" style="margin-bottom:2px">Time taken</div><div>${fmtSecs(attempt.time_taken_secs)}</div></div>
+              </div>
+              <div style="background:#f6f8f7;border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:10px">
+                <span class="muted small">Score</span>
+                <span id="live-score" style="font-weight:700;font-size:16px">${initialScore} / ${scoreTotalAll} marks (${initPct}%)</span>
+              </div>
+            </div>
+            ${formWrap}
+          </div>
+
+          <div class="card gl-side">
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:rgba(0,0,0,.4);margin-bottom:8px">${viewOnly ? "Manual Questions" : "Needs Grading"}</div>
+            <div id="sb-items">${sidebarItems}</div>
+            <div id="sidebar-done" style="${allDoneInit ? "" : "display:none;"}font-size:13px;color:#0b7a75;font-weight:600">✅ All questions graded</div>
+            <div id="sidebar-none" style="${noManualInit ? "" : "display:none;"}font-size:13px;color:rgba(0,0,0,.45)">No manual grading required</div>
+          </div>
+        </div>
+
+        ${manualQs.length > 0 ? `
+        <button id="mob-fab" onclick="openDrawer()">${viewOnly ? "📋 Manual Questions" : (ungradedManual.length > 0 ? `📋 Needs Grading (${ungradedManual.length})` : "✅ All Graded")}</button>
+        <div id="mob-ov" onclick="closeDrawer()"></div>
+        <div id="mob-dr">
+          <div style="font-size:14px;font-weight:700;margin-bottom:10px">${viewOnly ? "Manual Questions" : "Needs Grading"}</div>
+          <div id="dr-items">${sidebarItems}</div>
+          <div id="dr-done" style="${allDoneInit ? "" : "display:none;"}font-size:13px;color:#0b7a75;font-weight:600;margin:8px 0">✅ All questions graded</div>
+          <button class="btn3" style="margin-top:12px;width:100%" onclick="closeDrawer()">Close</button>
+        </div>` : ""}
+
+        <script>
+          const BASE_SCORE  = ${baseScore};
+          const SCORE_TOTAL = ${scoreTotalAll};
+          const IS_VIEW     = ${viewOnly};
+
+          function getLiveScore() {
+            let s = BASE_SCORE;
+            document.querySelectorAll('.manual-score-input').forEach(el => {
+              const v = parseFloat(el.value); if (!isNaN(v)) s += v;
+            });
+            return Math.round(s * 100) / 100;
+          }
+
+          function refreshScoreDisplay() {
+            const s = getLiveScore();
+            const pct = SCORE_TOTAL > 0 ? Math.round(s / SCORE_TOTAL * 10000) / 100 : 0;
+            document.getElementById('live-score').textContent = s + ' / ' + SCORE_TOTAL + ' marks (' + pct + '%)';
+          }
+
+          function refreshSidebar(qId, hasScore) {
+            if (IS_VIEW) return;
+            for (const cid of ['sb-items', 'dr-items']) {
+              const c = document.getElementById(cid);
+              if (!c) continue;
+              const el = c.querySelector('[data-sidebar-q="' + qId + '"]');
+              if (el) el.style.display = hasScore ? 'none' : '';
+            }
+            const sbItems = document.getElementById('sb-items');
+            let rem = 0;
+            if (sbItems) sbItems.querySelectorAll('[data-sidebar-q]').forEach(el => {
+              if (el.style.display !== 'none') rem++;
+            });
+            const done = rem === 0;
+            for (const id of ['sidebar-done', 'dr-done']) {
+              const el = document.getElementById(id); if (el) el.style.display = done ? '' : 'none';
+            }
+            updateFab(rem);
+          }
+
+          function updateFab(rem) {
+            const fab = document.getElementById('mob-fab'); if (!fab || IS_VIEW) return;
+            fab.textContent = rem === 0 ? '\u2705 All Graded' : '\uD83D\uDCCB Needs Grading (' + rem + ')';
+          }
+
+          function onScoreInput(qId, inp) {
+            refreshSidebar(qId, inp.value.trim() !== '');
+            refreshScoreDisplay();
+          }
+
+          function scrollToQ(id) {
+            const el = document.getElementById('q-' + id);
+            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            closeDrawer();
+          }
+
+          function openDrawer() {
+            document.getElementById('mob-ov').style.display = 'block';
+            document.getElementById('mob-dr').style.transform = 'translateY(0)';
+          }
+
+          function closeDrawer() {
+            const ov = document.getElementById('mob-ov'), dr = document.getElementById('mob-dr');
+            if (ov) ov.style.display = 'none';
+            if (dr) dr.style.transform = 'translateY(100%)';
+          }
+        </script>
       `);
     }
 
