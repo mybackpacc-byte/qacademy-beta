@@ -54,7 +54,7 @@ functions/
   question-bank.js  → Question bank routes
   attempts.js       → Exam taking engine routes (student)
   results.js        → Student results page, review page, sitting results
-  sittings.js       → Sittings management (School Admin) + approval gate configuration
+  sittings.js       → Sittings management + approval gates + approval inbox + exam preview
 
 db/
   schema.sql        → Reference schema — run once in D1 for a fresh clone
@@ -82,7 +82,10 @@ The double brackets are **required by Cloudflare Pages** — it's their syntax f
 /sitting-add-paper, /sitting-remove-paper,
 /sitting-gate-save,
 /sitting-gate-remove-approver,
-/sitting-gate-settings                  → sittings.js
+/sitting-gate-settings,
+/approvals, /approval-respond,
+/exam-preview,
+/approval-respond-with-comments         → sittings.js
 everything else                         → app.js
 ```
 
@@ -154,6 +157,7 @@ everything else                         → app.js
 ### Approval tables
 25. `sitting_approval_gates` — assigns approvers per exam + gate type (QUESTIONS/GRADING/RESULTS)
 26. `sitting_approval_responses` — records each approver's decision (PENDING/APPROVED/REJECTED) with optional note
+27. `sitting_approval_comments` — per-question comments left by approvers during review (exam_id, gate_type, question_id, approver_id, tenant_id, comment)
 
 ### Question bank tables
 15. `question_bank` — master question library
@@ -188,8 +192,8 @@ idx_exam_answers_question_id
 ## 🏗️ Dashboards Built
 
 ### System Admin (`/sys`) — COMPLETE
-### School Admin (`/school`) — COMPLETE (including Class management + Sittings section)
-### Teacher (`/teacher`) — COMPLETE (with exam builder + question bank + sitting badge + approvals pane)
+### School Admin (`/school`) — COMPLETE (including Class management + Sittings section + pending approvals banner)
+### Teacher (`/teacher`) — COMPLETE (with exam builder + question bank + sitting badge + approvals pane + pending approvals banner)
 ### Student (`/student`) — COMPLETE (with My Sittings section)
 
 ---
@@ -199,6 +203,12 @@ idx_exam_answers_question_id
 ---
 
 ## 📐 Exam Builder — COMPLETE
+
+### Tab order
+**Settings → Questions → 👁 Preview → Publish → Access → Results → Approvals**
+
+Preview is a link (not a pane) — opens `/exam-preview?exam_id=X` as a standalone page.
+Approvals tab only appears when at least one gate is configured for the exam.
 
 ### Settings Pane — COMPLETE
 - All fields: title, description, duration, max attempts, schedule, late policy, password, shuffle, navigation mode, results release, score display, pass mark, grade bands, custom fields
@@ -255,6 +265,41 @@ idx_exam_answers_question_id
   - GRADING — only when all attempts are FULLY_GRADED
   - RESULTS — only when GRADING gate is APPROVED or NOT_CONFIGURED
 - On resubmission after rejection — old responses deleted, fresh PENDING rows created for all approvers
+
+---
+
+## 👁 Exam Preview Page — COMPLETE (`/exam-preview`)
+
+### Route: `GET /exam-preview?exam_id=X`
+
+A standalone read-only page showing the exam exactly as a student would see it. Serves two purposes: teacher/admin preview and approver review.
+
+### Access
+- Teacher who owns the exam
+- School Admin of that tenant
+- Any user assigned as an approver on any gate for this exam
+- Anyone else → redirected away
+
+### Features
+- Clean read-only view — no edit controls, no correct answer indicators
+- Questions shown in `sort_order` with marks
+- Options shown as unselectable radio buttons / checkboxes (MCQ, Multiple Select, True/False)
+- Short Answer / Essay shown as a blank greyed-out textarea
+- **View toggle** — "All questions" (default) and "One at a time" — client-side, no reload
+- One-at-a-time mode: Previous / Next navigation + question counter (e.g. "Question 3 of 12")
+- Back link: teachers/admins → exam builder; approvers → `/approvals`
+
+### Approver mode (shown when viewer is an assigned approver with PENDING gate)
+- Banner at top: "You are reviewing this exam for the [GATE TYPE] gate"
+- Comment textarea below each question (optional, pre-filled from DB if previously saved)
+- Other approvers' comments shown read-only with their name on each question
+- Gate decision form at the bottom: overall note + Approve / Reject buttons
+- Submits to `POST /approval-respond-with-comments`
+- Teachers see all approver comments read-only — no comment form for teachers
+
+### Teacher / Admin read-only view
+- No comment boxes, no decision form
+- Other approvers' submitted comments visible per question (read-only)
 
 ---
 
@@ -441,6 +486,10 @@ A sitting groups multiple exam papers under one formal event (e.g. "June 2026 Fi
 | `GET /sitting-gate-settings?sitting_id=X&exam_id=Y` | Configure approval gates per paper |
 | `POST /sitting-gate-save` | Add an approver to a gate |
 | `POST /sitting-gate-remove-approver` | Remove an approver from a gate |
+| `GET /approvals` | Approval inbox — any school role |
+| `POST /approval-respond` | Submit approve/reject from inbox (no per-question comments) |
+| `GET /exam-preview?exam_id=X` | Standalone exam preview + approver review page |
+| `POST /approval-respond-with-comments` | Submit approve/reject with per-question comments |
 
 ### Sitting builder tabs
 
@@ -521,21 +570,39 @@ Optional sign-off checkpoints per exam paper. Admin configures which gates are a
 ### DB tables
 - `sitting_approval_gates` — one row per approver per gate per exam (sitting_id, exam_id, gate_type, user_id, tenant_id)
 - `sitting_approval_responses` — one row per approver decision (exam_id, gate_type, approver_id, status, note, responded_at)
+- `sitting_approval_comments` — per-question comments (exam_id, gate_type, question_id, approver_id, tenant_id, comment)
+
+---
+
+## 📬 Approval Inbox — COMPLETE (`sittings.js`)
+
+### Route: `GET /approvals`
+- Accessible to any logged-in school user (Teacher, Admin, or any role assigned as approver)
+- Queries `sitting_approval_gates` for gates where `user_id = current user`
+- Joins against `sitting_approval_responses` to surface items where the user's response is still PENDING
+- Each pending item shows: exam title, sitting title, gate type badge, submitter (teacher) name, "View exam →" link to `/exam-preview`, inline approve/reject form with optional note
+- Empty state shown when nothing pending
+- Recent (previously actioned) items shown read-only below in a "Recent" table
+- After responding → redirects to `/approvals`
+
+### Route: `POST /approval-respond`
+- Validates current user is an assigned approver for the gate
+- Upserts response row in `sitting_approval_responses`
+- Redirects to `/approvals`
+
+### Route: `POST /approval-respond-with-comments`
+- Same as above but also saves per-question comments to `sitting_approval_comments` (upsert per question)
+- Used when approver submits from `/exam-preview`
+
+### Dashboard banners
+- **School Admin** (`/school`) and **Teacher** (`/teacher`) dashboards show a 📬 pending banner when the user has items waiting
+- Banner: "📬 You have X pending approval(s) — View Inbox →"
+- Hidden entirely when count is 0
+- **Student** dashboard intentionally excluded — students are never approvers
 
 ---
 
 ## ⏳ What Comes Next (In Order)
-
-### Phase 8c — Approval Inbox
-- [ ] Pending approvals surface on every dashboard regardless of role
-- [ ] Clean list of what's waiting for each user to action
-- [ ] Approve / reject with note directly from inbox
-- [ ] Accessible to any role — Teachers, Admins, anyone assigned as approver
-
-### Phase 8b.2 — Question Level Approval Comments
-- [ ] Approver reviews individual questions during approval
-- [ ] Per-question comment field
-- [ ] Teacher sees question-level feedback alongside overall gate decision
 
 ### Phase 9 — Admin Dashboard Restructure + app.js split
 - [ ] Split `app.js` into `admin.js`, `teacher.js`, `student.js`
@@ -597,6 +664,10 @@ Optional sign-off checkpoints per exam paper. Admin configures which gates are a
 - **Approvers are specific people not roles** — any active school user can be assigned as approver regardless of their role
 - **Role filter in approver picker is dynamic** — reads distinct roles from memberships table, never hardcoded, future-proof
 - **Approval notes on both approve and reject** — approver can always leave a note regardless of decision
+- **Per-question comments saved with gate decision** — not autosaved; approver reviews all questions then submits in one action
+- **Per-question comments visible to all approvers on that gate + the teacher** — comments persist across resubmissions
+- **Exam preview page serves dual purpose** — teacher/admin preview AND approver review page; same route, approver mode activated automatically
+- **Students excluded from approval inbox banner** — students are never approvers
 - **Key settings snapshotted on attempt** — `score_display`, `pass_mark_percent`, `grade_bands_json`, `question_order_json` stored on `exam_attempts` so results always reflect settings at time of sitting
 - **Publish pane design principle** — always show all blocks, explain why buttons are disabled, never hide
 - **Grading screen shows questions in `sort_order`** — original teacher order, not student shuffle order
@@ -631,7 +702,9 @@ APP_SECRET   → pepper for password hashing (set in Cloudflare Pages settings)
 - Large handler rewrites frequently hit the 32000 output token limit — always instruct Claude to split into two parts if this happens
 - Sitting lock on publish and settings pane must check role — Teachers locked, School Admins always have full access
 - When exam is added to a sitting, sitting rules take effect immediately regardless of prior exam status
+- DB migrations must be run against live D1 via wrangler — schema.sql updates alone are not enough; always run the wrangler command immediately after updating schema.sql
+- Approval inbox banner should not appear on Student dashboard — students are never approvers
 
 ---
 
-*Last updated: 2026-03-09. Phase 6 complete (Student Review Page). Phase 8a complete (Sittings Core). Phase 8b complete (Approval Gates + UI improvements). Next: Phase 8c (Approval Inbox).*
+*Last updated: 2026-03-09. Phase 8c complete (Approval Inbox). Phase 8b.2 complete (Exam Preview Page + Approver Review with per-question comments). Next: Phase 8b.2 testing, then Phase 9 (Admin Dashboard Restructure).*
