@@ -49,11 +49,12 @@ A **multi-tenant exam taking platform for schools.**
 functions/
   [[path]].js       → Entry point router — directs traffic to correct handler
   shared.js         → All shared helpers (auth, DB, crypto, cookies, HTML) + recalcAttempt
-  app.js            → User, auth, school, admin routes
+  app.js            → User, auth, school, admin routes (to be split in Phase 9)
   exams.js          → Exam builder routes + teacher results pane + grading screen
   question-bank.js  → Question bank routes
   attempts.js       → Exam taking engine routes (student)
-  results.js        → Student results page, review page, sitting results (future)
+  results.js        → Student results page, review page, sitting results
+  sittings.js       → Sittings management (School Admin) + approval gate configuration
 
 db/
   schema.sql        → Reference schema — run once in D1 for a fresh clone
@@ -70,10 +71,18 @@ The double brackets are **required by Cloudflare Pages** — it's their syntax f
 /exam-create, /exam-builder,
 /exam-save-settings, /exam-*,
 /exam-bank-picker, /exam-add-from-bank,
-/exam-grade, /exam-results-csv          → exams.js
+/exam-grade, /exam-results-csv,
+/exam-gate-submit                       → exams.js
 /attempt-start, /attempt-take,
 /attempt-complete                       → attempts.js
-/attempt-results, /attempt-review       → results.js
+/attempt-results, /attempt-review,
+/sitting-results                        → results.js
+/sittings, /sitting-builder,
+/sitting-create, /sitting-save-settings,
+/sitting-add-paper, /sitting-remove-paper,
+/sitting-gate-save,
+/sitting-gate-remove-approver,
+/sitting-gate-settings                  → sittings.js
 everything else                         → app.js
 ```
 
@@ -142,6 +151,10 @@ everything else                         → app.js
 23. `exam_sittings` — groups multiple exam papers into one sitting (School Admin controlled)
 24. `exam_sitting_papers` — which exams belong to which sitting
 
+### Approval tables
+25. `sitting_approval_gates` — assigns approvers per exam + gate type (QUESTIONS/GRADING/RESULTS)
+26. `sitting_approval_responses` — records each approver's decision (PENDING/APPROVED/REJECTED) with optional note
+
 ### Question bank tables
 15. `question_bank` — master question library
 16. `question_bank_options` — options for bank questions (column: `bank_question_id` ⚠️ NOT `question_id`)
@@ -175,9 +188,9 @@ idx_exam_answers_question_id
 ## 🏗️ Dashboards Built
 
 ### System Admin (`/sys`) — COMPLETE
-### School Admin (`/school`) — COMPLETE (including Class management)
-### Teacher (`/teacher`) — COMPLETE (with exam builder + question bank)
-### Student (`/student`) — COMPLETE
+### School Admin (`/school`) — COMPLETE (including Class management + Sittings section)
+### Teacher (`/teacher`) — COMPLETE (with exam builder + question bank + sitting badge + approvals pane)
+### Student (`/student`) — COMPLETE (with My Sittings section)
 
 ---
 
@@ -188,7 +201,9 @@ idx_exam_answers_question_id
 ## 📐 Exam Builder — COMPLETE
 
 ### Settings Pane — COMPLETE
-All fields: title, description, duration, max attempts, schedule, late policy, password, shuffle, navigation mode, results release, score display, pass mark, grade bands, custom fields.
+- All fields: title, description, duration, max attempts, schedule, late policy, password, shuffle, navigation mode, results release, score display, pass mark, grade bands, custom fields
+- **Locked for Teachers when exam belongs to a sitting** — fully visible but all inputs disabled, clear message shown
+- **Always fully editable for School Admin** regardless of sitting membership
 
 ### Questions Pane — COMPLETE
 - 5 question types: MCQ, Multiple Select, True/False, Short Answer, Essay
@@ -198,6 +213,7 @@ All fields: title, description, duration, max attempts, schedule, late policy, p
 - **📚 Add from bank** button → goes to bank picker
 - Questions added inline are auto-saved to bank as PERSONAL
 - Badge shows "📚 From bank" on questions linked to the bank
+- Always editable for Teachers and Admins regardless of sitting membership
 
 ### Publish Pane — COMPLETE
 - Three always-visible blocks: Publish, Close, Release Results
@@ -206,6 +222,9 @@ All fields: title, description, duration, max attempts, schedule, late policy, p
 - Date stamps on Close and Release Results blocks
 - IMMEDIATE policy sets `results_published_at` on publish
 - AFTER_CLOSE policy sets `results_published_at` on close
+- **Locked for Teachers when exam belongs to a sitting** — clear message shown
+- **Always fully functional for School Admin**
+- **Gate enforcement for Admin** — Publish blocked if QUESTIONS gate not approved; Release Results blocked if GRADING or RESULTS gate not approved; Close always free
 
 ### Access Pane — COMPLETE
 - Assign students to an exam by class, by course, or individually
@@ -220,6 +239,22 @@ All fields: title, description, duration, max attempts, schedule, late policy, p
 - Export CSV button → `GET /exam-results-csv?exam_id=X`
 - Grade button → `/exam-grade?attempt_id=X` for needs grading
 - View button → `/exam-grade?attempt_id=X&view=1` for fully graded
+
+### Approvals Pane — COMPLETE
+- Tab only appears when at least one approval gate is configured for the exam
+- Designed for both sitting-based and future standalone exam approvals
+- One block per configured gate — QUESTIONS / GRADING / RESULTS
+- Shows gate status: APPROVED ✅ / REJECTED ❌ / PENDING ⏳ / NOT_CONFIGURED
+- Per-approver status shown — name + decision
+- Rejection note visible when gate is rejected
+- Notes available on both APPROVE and REJECT responses
+- **Teacher** — sees status, Submit / Resubmit button when gate is ready
+- **Admin** — sees status, read only (configures gates in sitting builder)
+- Submission rules enforced server-side:
+  - QUESTIONS — submittable any time while exam is DRAFT
+  - GRADING — only when all attempts are FULLY_GRADED
+  - RESULTS — only when GRADING gate is APPROVED or NOT_CONFIGURED
+- On resubmission after rejection — old responses deleted, fresh PENDING rows created for all approvers
 
 ---
 
@@ -254,7 +289,11 @@ All fields: title, description, duration, max attempts, schedule, late policy, p
 
 ## 🎓 Student Dashboard — COMPLETE
 
-- Shows all exams the student has access to via `exam_access`
+- **My Sittings section** — shown above standalone exams when student has at least one attempt in any sitting paper
+  - Each sitting card: title, academic year, "X of Y results available"
+  - [View Sitting Results] → `/sitting-results?sitting_id=X`
+  - Hidden entirely if student has no sittings
+- Shows all standalone exams the student has access to via `exam_access`
 - Status badges: Open (green), Upcoming (grey), Closed (red), Completed (blue)
 - DRAFT exams never shown to students
 - Shows 🔒 icon if exam is password protected
@@ -385,23 +424,146 @@ Runs immediately on submit inside `POST /attempt-take`:
 
 ---
 
+## 📋 Sittings — COMPLETE (`sittings.js`)
+
+### What a sitting is
+A sitting groups multiple exam papers under one formal event (e.g. "June 2026 Finals"). It is a School Admin / Exams Officer tool. Individual exams are unchanged — a sitting is a grouping layer only. QAcademy does not calculate combined scores — each paper result stands on its own. Sittings are the primary workflow for schools running professional or formal exams.
+
+### Routes
+| Route | What It Does |
+|---|---|
+| `GET /sittings` | List all sittings for the school |
+| `GET /sitting-builder?sitting_id=X` | Manage a sitting — Settings, Papers, Approvals, Results tabs |
+| `POST /sitting-create` | Create new sitting |
+| `POST /sitting-save-settings` | Save sitting title, description, academic year, status |
+| `POST /sitting-add-paper` | Add a paper — Mode 1 (link existing) or Mode 2 (create new) |
+| `POST /sitting-remove-paper` | Remove a paper from the sitting |
+| `GET /sitting-gate-settings?sitting_id=X&exam_id=Y` | Configure approval gates per paper |
+| `POST /sitting-gate-save` | Add an approver to a gate |
+| `POST /sitting-gate-remove-approver` | Remove an approver from a gate |
+
+### Sitting builder tabs
+
+**Settings tab:**
+- Title, description, academic year, status (DRAFT/ACTIVE/CLOSED)
+
+**Papers tab:**
+- List of papers in sitting — title, course, teacher, exam status badge
+- Mode 1 — link an existing exam (any status)
+- Mode 2 — create new DRAFT exam — enter title, select course, assign teacher → exam auto-created and appears on teacher's dashboard immediately. Teacher added to course_teachers if not already assigned.
+
+**Approvals tab:**
+- Overview table — one row per paper: Paper | Course | Teacher | Q/G/R gate badges | [Set Approvals] button
+- Gate badges show count of approvers per gate — grey if 0 (inactive), green badge if 1+ (active)
+- [Set Approvals] → `/sitting-gate-settings` page for that paper
+
+**Results tab:**
+- One row per student with at least one attempt in any paper
+- Columns: student name + one column per paper in sort_order
+- Each cell: result respecting score_display if released, "Pending" if not, "—" if no attempt
+- Clicking a released cell → `/attempt-results?attempt_id=X`
+- No combined score
+
+### Gate settings page (`/sitting-gate-settings`)
+- Three gate cards — QUESTIONS / GRADING / RESULTS
+- Each card: description of what gate controls, list of assigned approvers with role label and Remove button, Add approver section
+- Add approver picker:
+  - Role filter — dynamic, reads distinct roles from memberships table, never hardcoded, future-proof
+  - Course filter — all active courses in school, default "All courses"
+  - Both filters work together client-side, no page reload
+  - Approver dropdown shows name + role label using `roleLabel()` helper
+  - Already assigned approvers excluded from dropdown
+- No approvers assigned → gate inactive, muted message shown
+- Approvers assigned → green "Active" badge on card header
+
+### Sitting rules on exams
+When an exam belongs to a sitting:
+- **Teacher** — Settings pane locked (visible but all inputs disabled), Publish pane locked
+- **School Admin** — Settings pane fully editable, Publish pane fully functional
+- Sitting rules take effect immediately when exam is added — regardless of prior status
+- ⚠️ Warning when adding already-published exam to a sitting — deferred improvement
+
+### Student sitting results (`GET /sitting-results?sitting_id=X`)
+- Student role only — enforced server-side
+- Student must have at least one attempt in at least one paper
+- Shows all papers in sort_order: paper title, course, result or "Pending"
+- [View] button on released papers → `/attempt-results?attempt_id=X`
+- No combined score
+
+---
+
+## 🔐 Approval Gates — COMPLETE (`sittings.js` + `exams.js`)
+
+### What approval gates are
+Optional sign-off checkpoints per exam paper. Admin configures which gates are active and who the approvers are. Teacher submits work for approval. All assigned approvers must approve before the gate clears. Any one rejection sends it back to the teacher.
+
+### Three gate types
+- **QUESTIONS** — must be approved before admin can publish the exam
+- **GRADING** — must be approved before admin can release results
+- **RESULTS** — final sign-off before results go live (additional gate after grading)
+
+### Approval system design
+- Gates are configured per exam — designed to work for sitting-based exams now and standalone exams in the future
+- Approvers are specific people — any active school user regardless of role
+- Multiple approvers per gate — ALL must approve for gate to clear
+- Any one rejection → gate fails, teacher notified, must fix and resubmit
+- Notes are optional on both APPROVE and REJECTED responses
+- On resubmission — all previous responses deleted, fresh PENDING rows created for all approvers
+- `getGateStatus()` helper in exams.js — returns APPROVED / REJECTED / PENDING / NOT_CONFIGURED
+
+### Gate progression rules
+- QUESTIONS gate cleared → Admin can publish exam
+- GRADING gate cleared → Admin can release results
+- RESULTS gate cleared → Admin can release results (if results gate configured)
+- GRADING gate submission — only allowed when all submitted attempts are FULLY_GRADED
+- RESULTS gate submission — only allowed when GRADING gate is APPROVED or NOT_CONFIGURED
+
+### DB tables
+- `sitting_approval_gates` — one row per approver per gate per exam (sitting_id, exam_id, gate_type, user_id, tenant_id)
+- `sitting_approval_responses` — one row per approver decision (exam_id, gate_type, approver_id, status, note, responded_at)
+
+---
+
 ## ⏳ What Comes Next (In Order)
 
-### Phase 8 — Sittings (School Admin)
-- [ ] Create sittings, assign papers
-- [ ] Sitting results page — combined view across papers
-- [ ] Drill into individual paper → `/attempt-results?attempt_id=X`
+### Phase 8c — Approval Inbox
+- [ ] Pending approvals surface on every dashboard regardless of role
+- [ ] Clean list of what's waiting for each user to action
+- [ ] Approve / reject with note directly from inbox
+- [ ] Accessible to any role — Teachers, Admins, anyone assigned as approver
 
-### Phase 9 — Question Bank bulk import (CSV/Excel)
+### Phase 8b.2 — Question Level Approval Comments
+- [ ] Approver reviews individual questions during approval
+- [ ] Per-question comment field
+- [ ] Teacher sees question-level feedback alongside overall gate decision
 
-### Future improvements noted
+### Phase 9 — Admin Dashboard Restructure + app.js split
+- [ ] Split `app.js` into `admin.js`, `teacher.js`, `student.js`
+- [ ] School Admin dashboard restructured into proper navigation sections:
+  - Overview (key stats)
+  - Sittings
+  - Courses
+  - Classes
+  - People
+  - Join Codes
+
+### Phase 10 — Question Bank Bulk Import (CSV/Excel)
+
+### Phase 11 — UI & Design Polish
+- [ ] Consistent visual language across the whole platform
+- [ ] Proper typography, spacing, colours
+- [ ] Mobile experience polished
+- [ ] Loading states, empty states, error states
+- [ ] Design system so everything stays consistent
+
+### Deferred small improvements
+- **Warning when adding published exam to a sitting** — "This exam is already published and may have active students. Sitting rules will apply from this point forward."
 - **Results pane** — summary cards showing total pass/fail counts, filter by grade band
-- **Grading view** — currently shows all questions, teacher sees full attempt context
-- **exam_access extension** — add `access_source` (CLASS/COURSE/INDIVIDUAL) and `source_id` columns to track how each student was granted access. Enables accurate class display on result slip and clean removal of access by class.
-- **Anti-cheat / proctoring** — Page Visibility API to detect tab switching, Fullscreen API enforcement, violation log on `exam_attempts` as `violations_json`, configurable auto-submit after X violations, teacher sees violation summary in results pane
-- **question_display setting** — add `ONE_AT_A_TIME | ALL` to exam settings for teacher to override FREE mode display. New column on `exams` table, snapshot onto `exam_attempts`.
-- **Printable review page** — student name shown only in `@media print`, hidden on screen
-- **Printable marksheet** — teacher prints grading screen as official marksheet, questions in `sort_order`
+- **exam_access extension** — add `access_source` (CLASS/COURSE/INDIVIDUAL) and `source_id` columns
+- **Anti-cheat / proctoring** — Page Visibility API, Fullscreen enforcement, violation log
+- **question_display setting** — ONE_AT_A_TIME | ALL per exam
+- **Printable review page** — student name shown only in `@media print`
+- **Printable marksheet** — teacher prints grading screen as official marksheet
 
 ### Phase 2 — Auth Improvements (Deferred)
 - [ ] Forgot password flow
@@ -412,7 +574,7 @@ Runs immediately on submit inside `POST /attempt-take`:
 
 ## 💡 Important Decisions & Preferences
 
-- **Modular file structure** — split into shared.js, app.js, exams.js, question-bank.js, attempts.js, results.js
+- **Modular file structure** — shared.js, app.js, exams.js, question-bank.js, attempts.js, results.js, sittings.js
 - **No third party auth** — custom built
 - **SQLite via D1** — TEXT for IDs and timestamps
 - **PBKDF2** passwords, 40,000 iterations, pepper from `env.APP_SECRET`
@@ -429,6 +591,12 @@ Runs immediately on submit inside `POST /attempt-take`:
 - **Exam complete screen** — engine shows "results available" or "results released later" depending on policy, then student navigates to results page separately
 - **Two results paths** — standalone exam results and sitting results (combined papers)
 - **Sittings are a grouping layer only** — individual exams are unchanged, sitting just links them together
+- **No combined scores in sittings** — QAcademy delivers clean individual paper results; schools apply their own grading formula externally
+- **Sittings = primary workflow for serious schools** — formal exam bodies, professional certifications, national exams all use sitting-based organisation
+- **Approval gates are configurable per sitting** — not hardcoded; each sitting defines its own rules. Designed to support standalone exam approvals in future too.
+- **Approvers are specific people not roles** — any active school user can be assigned as approver regardless of their role
+- **Role filter in approver picker is dynamic** — reads distinct roles from memberships table, never hardcoded, future-proof
+- **Approval notes on both approve and reject** — approver can always leave a note regardless of decision
 - **Key settings snapshotted on attempt** — `score_display`, `pass_mark_percent`, `grade_bands_json`, `question_order_json` stored on `exam_attempts` so results always reflect settings at time of sitting
 - **Publish pane design principle** — always show all blocks, explain why buttons are disabled, never hide
 - **Grading screen shows questions in `sort_order`** — original teacher order, not student shuffle order
@@ -437,6 +605,8 @@ Runs immediately on submit inside `POST /attempt-take`:
 - **New columns before new tables** — always consider adding columns to existing tables before creating new ones
 - **recalcAttempt lives in shared.js** — used by both auto grading (attempts.js) and manual grading (exams.js)
 - **Review page is a learning tool** — no personal details shown on screen; print version with name deferred
+- **app.js will be split in Phase 9** — into admin.js, teacher.js, student.js alongside admin dashboard restructure
+- **UI polish deferred to Phase 11** — build logic and flows correctly first, then do one focused design sprint across the whole platform
 - When doing a full rewrite of all files, always verify actual D1 column names match code before deploying
 
 ---
@@ -459,7 +629,9 @@ APP_SECRET   → pepper for password hashing (set in Cloudflare Pages settings)
 - Claude Desktop defaults to creating new branches — always explicitly instruct it to commit directly to main
 - `exam_access` does not have a `resource_type` column — class lookup must go via `class_students` joined to `classes`, not via `exam_access`
 - Large handler rewrites frequently hit the 32000 output token limit — always instruct Claude to split into two parts if this happens
+- Sitting lock on publish and settings pane must check role — Teachers locked, School Admins always have full access
+- When exam is added to a sitting, sitting rules take effect immediately regardless of prior exam status
 
 ---
 
-*Last updated: 2026-03-08. Exam taking engine complete. Auto grading complete. Teacher results pane and manual grading screen complete. Student results page complete. Student review page complete (Phase 6). Next: Sittings (Phase 8).*
+*Last updated: 2026-03-09. Phase 6 complete (Student Review Page). Phase 8a complete (Sittings Core). Phase 8b complete (Approval Gates + UI improvements). Next: Phase 8c (Approval Inbox).*
