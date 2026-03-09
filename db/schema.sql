@@ -423,6 +423,19 @@ CREATE TABLE IF NOT EXISTS sitting_approval_responses (
   updated_at   TEXT NOT NULL
 );
 
+-- 27. sitting_approval_comments — per-question comments left by approvers
+CREATE TABLE IF NOT EXISTS sitting_approval_comments (
+  id           TEXT PRIMARY KEY,
+  exam_id      TEXT NOT NULL,
+  gate_type    TEXT NOT NULL,    -- QUESTIONS | GRADING | RESULTS
+  question_id  TEXT NOT NULL,
+  approver_id  TEXT NOT NULL,
+  tenant_id    TEXT NOT NULL,
+  comment      TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+
 
 -- ============================================================
 -- INDEXES
@@ -446,3 +459,6 @@ CREATE INDEX IF NOT EXISTS idx_exam_answers_question_id ON exam_answers(question
 
 -- ALTER TABLE exam_questions ADD COLUMN bank_question_id TEXT;
 -- ALTER TABLE exams ADD COLUMN closed_at TEXT;
+
+-- Phase 8b.2 — run on existing DB via wrangler d1 execute:
+-- CREATE TABLE IF NOT EXISTS sitting_approval_comments (id TEXT PRIMARY KEY, exam_id TEXT NOT NULL, gate_type TEXT NOT NULL, question_id TEXT NOT NULL, approver_id TEXT NOT NULL, tenant_id TEXT NOT NULL, comment TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);

@@ -687,6 +687,7 @@ export async function handleExamRequest(ctx) {
           <div class="tabs">
             <button class="tab ${activePane === "settings" ? "active" : ""}" onclick="showPane('settings',this)">Settings</button>
             <button class="tab ${activePane === "questions" ? "active" : ""}" onclick="showPane('questions',this)">Questions</button>
+            <a href="/exam-preview?exam_id=${escapeAttr(examId)}" class="tab" style="text-decoration:none;display:inline-flex;align-items:center">&#128065; Preview</a>
             <button class="tab ${activePane === "publish" ? "active" : ""}" onclick="showPane('publish',this)">Publish</button>
             <button class="tab ${activePane === "access" ? "active" : ""}" onclick="showPane('access',this)">Access</button>
             <button class="tab" onclick="showPane('results',this)">Results</button>

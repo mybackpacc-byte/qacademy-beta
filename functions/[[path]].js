@@ -43,7 +43,9 @@ export async function onRequest(ctx) {
     path === "/sitting-gate-remove-approver" ||
     path === "/sitting-gate-settings" ||
     path === "/approvals" ||
-    path === "/approval-respond"
+    path === "/approval-respond" ||
+    path === "/exam-preview" ||
+    path === "/approval-respond-with-comments"
   ) {
     return handleSittingRequest(ctx);
   }

@@ -1107,7 +1107,7 @@ export async function handleSittingRequest(ctx) {
                   <span class="pill" style="background:#fff3e0;color:#a05000;font-size:12px">${gateIcon(item.gate_type)} ${escapeHtml(gateLabel(item.gate_type))}</span>
                   ${item.submitter_name ? `<span class="muted small">by ${escapeHtml(item.submitter_name)}</span>` : ""}
                 </div>
-                <a href="/exam-builder?exam_id=${escapeAttr(item.exam_id)}&pane=approvals" style="font-size:13px">View exam &#8599;</a>
+                <a href="/exam-preview?exam_id=${escapeAttr(item.exam_id)}" style="font-size:13px">View exam &#8599;</a>
               </div>
               <div style="min-width:240px;flex-shrink:0">
                 <form method="post" action="/approval-respond">
@@ -1228,6 +1228,401 @@ export async function handleSittingRequest(ctx) {
           [uuid(), examId, gateType, userId, response, note, tenantId, ts, ts]
         );
       }
+
+      return redirect("/approvals");
+    }
+
+    // ----------------------------------------------------------------
+    // GET /exam-preview — Read-only exam preview + approver review layer
+    // ----------------------------------------------------------------
+    if (path === "/exam-preview" && request.method === "GET") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active) return redirect("/choose-school");
+
+      const examId   = url.searchParams.get("exam_id") || "";
+      if (!examId) return redirect("/");
+      const userId   = r.user.id;
+      const tenantId = active.tenant_id;
+
+      // Load exam + course info
+      const exam = await first(
+        `SELECT e.*, c.title AS course_title, u.name AS teacher_name
+         FROM exams e
+         JOIN courses c ON c.id = e.course_id
+         LEFT JOIN users u ON u.id = e.created_by
+         WHERE e.id=? AND e.tenant_id=?`,
+        [examId, tenantId]
+      );
+      if (!exam) return redirect("/");
+
+      // Access check: teacher (who owns course), school admin, or any assigned approver
+      let canAccess = false;
+      if (active.role === "SCHOOL_ADMIN") {
+        canAccess = true;
+      } else if (active.role === "TEACHER") {
+        const owns = await first(
+          `SELECT 1 AS x FROM course_teachers WHERE course_id=? AND user_id=? LIMIT 1`,
+          [exam.course_id, userId]
+        );
+        if (owns) canAccess = true;
+      }
+      if (!canAccess) {
+        const anyGate = await first(
+          `SELECT id FROM sitting_approval_gates WHERE exam_id=? AND user_id=? AND tenant_id=? LIMIT 1`,
+          [examId, userId, tenantId]
+        );
+        if (anyGate) canAccess = true;
+      }
+      if (!canAccess) return redirect("/");
+
+      // Approver mode: current user has a PENDING response on any gate for this exam
+      const pendingGate = await first(
+        `SELECT sag.gate_type
+         FROM sitting_approval_gates sag
+         JOIN sitting_approval_responses sar
+           ON sar.exam_id=sag.exam_id AND sar.gate_type=sag.gate_type
+          AND sar.approver_id=sag.user_id AND sar.tenant_id=sag.tenant_id
+         WHERE sag.exam_id=? AND sag.user_id=? AND sag.tenant_id=? AND sar.status='PENDING'
+         LIMIT 1`,
+        [examId, userId, tenantId]
+      );
+      const isApproverMode  = !!pendingGate;
+      const activeGateType  = pendingGate ? pendingGate.gate_type : null;
+      const GATE_LABEL      = { QUESTIONS: "Questions", GRADING: "Grading", RESULTS: "Results" };
+
+      // Load questions (no model_answer / feedback — student view only)
+      const questions = await all(
+        `SELECT id, question_type, question_text, marks, sort_order
+         FROM exam_questions WHERE exam_id=? AND tenant_id=? ORDER BY sort_order ASC`,
+        [examId, tenantId]
+      );
+      const allOptions = questions.length > 0 ? await all(
+        `SELECT question_id, option_text, sort_order
+         FROM exam_question_options
+         WHERE question_id IN (${questions.map(() => "?").join(",")})
+         ORDER BY sort_order ASC`,
+        questions.map(q => q.id)
+      ) : [];
+      const optsByQ = {};
+      for (const o of allOptions) {
+        if (!optsByQ[o.question_id]) optsByQ[o.question_id] = [];
+        optsByQ[o.question_id].push(o);
+      }
+      const totalMarks = questions.reduce((s, q) => s + Number(q.marks || 0), 0);
+
+      // Pre-fill this approver's existing comments
+      let myComments = {};
+      if (isApproverMode) {
+        const rows = await all(
+          `SELECT question_id, comment FROM sitting_approval_comments
+           WHERE exam_id=? AND gate_type=? AND approver_id=? AND tenant_id=?`,
+          [examId, activeGateType, userId, tenantId]
+        );
+        for (const c of rows) myComments[c.question_id] = c.comment;
+      }
+
+      // Load comments visible to this viewer
+      let allVisibleComments = [];
+      if (isApproverMode) {
+        // Approver sees all comments on their gate (all approvers)
+        allVisibleComments = await all(
+          `SELECT sac.question_id, sac.approver_id, sac.comment, u.name AS approver_name
+           FROM sitting_approval_comments sac
+           JOIN users u ON u.id = sac.approver_id
+           WHERE sac.exam_id=? AND sac.gate_type=? AND sac.tenant_id=?
+           ORDER BY sac.created_at ASC`,
+          [examId, activeGateType, tenantId]
+        );
+      } else if (active.role === "SCHOOL_ADMIN" || active.role === "TEACHER") {
+        // Teacher/admin sees all comments across all gates (read-only)
+        allVisibleComments = await all(
+          `SELECT sac.question_id, sac.approver_id, sac.gate_type, sac.comment, u.name AS approver_name
+           FROM sitting_approval_comments sac
+           JOIN users u ON u.id = sac.approver_id
+           WHERE sac.exam_id=? AND sac.tenant_id=?
+           ORDER BY sac.gate_type ASC, sac.created_at ASC`,
+          [examId, tenantId]
+        );
+      }
+      // Group by question_id (excluding own comment — shown in textarea)
+      const otherCommentsByQ = {};
+      for (const c of allVisibleComments) {
+        if (isApproverMode && c.approver_id === userId) continue;
+        if (!otherCommentsByQ[c.question_id]) otherCommentsByQ[c.question_id] = [];
+        otherCommentsByQ[c.question_id].push(c);
+      }
+
+      // Helpers
+      const qTypeLabel = (t) => {
+        if (t === "MCQ")             return "Multiple Choice";
+        if (t === "MULTIPLE_SELECT") return "Multiple Select";
+        if (t === "TRUE_FALSE")      return "True / False";
+        if (t === "SHORT_ANSWER")    return "Short Answer";
+        if (t === "ESSAY")           return "Essay";
+        return t;
+      };
+
+      const renderOptions = (q) => {
+        const opts = optsByQ[q.id] || [];
+        if (q.question_type === "MCQ") {
+          return `<div style="pointer-events:none">` +
+            opts.map(o => `<div class="opt-item"><input type="radio" style="width:auto" /><span>${escapeHtml(o.option_text)}</span></div>`).join("") +
+            `</div>`;
+        }
+        if (q.question_type === "MULTIPLE_SELECT") {
+          return `<div style="pointer-events:none">` +
+            opts.map(o => `<div class="opt-item"><input type="checkbox" style="width:auto" /><span>${escapeHtml(o.option_text)}</span></div>`).join("") +
+            `</div>`;
+        }
+        if (q.question_type === "TRUE_FALSE") {
+          return `<div style="pointer-events:none">
+            <div class="opt-item"><input type="radio" style="width:auto" /><span>True</span></div>
+            <div class="opt-item"><input type="radio" style="width:auto" /><span>False</span></div>
+          </div>`;
+        }
+        if (q.question_type === "SHORT_ANSWER") {
+          return `<textarea disabled rows="3" placeholder="Student writes their answer here…" style="width:100%;background:#f9fafb;color:rgba(0,0,0,.4);border-color:rgba(0,0,0,.12);box-sizing:border-box"></textarea>`;
+        }
+        if (q.question_type === "ESSAY") {
+          return `<textarea disabled rows="6" placeholder="Student writes their essay here…" style="width:100%;background:#f9fafb;color:rgba(0,0,0,.4);border-color:rgba(0,0,0,.12);box-sizing:border-box"></textarea>`;
+        }
+        return "";
+      };
+
+      const questionsHtml = questions.length === 0
+        ? `<div class="card"><p class="muted" style="text-align:center;padding:24px 0">No questions added yet.</p></div>`
+        : questions.map((q, i) => {
+          const others = otherCommentsByQ[q.id] || [];
+          const othersHtml = others.map(c => `
+            <div class="other-comment">
+              <span style="font-weight:700;font-size:12px">${escapeHtml(c.approver_name)}</span>
+              ${c.gate_type ? `<span class="muted small" style="margin-left:4px">(${escapeHtml(GATE_LABEL[c.gate_type] || c.gate_type)} Gate)</span>` : ""}
+              <div style="margin-top:4px;color:rgba(0,0,0,.75)">${escapeHtml(c.comment)}</div>
+            </div>
+          `).join("");
+
+          const commentBlock = (othersHtml || isApproverMode) ? `
+            <div class="comment-block">
+              ${othersHtml}
+              ${isApproverMode ? `
+                <label style="font-size:12px;color:rgba(0,0,0,.5);display:block;margin-top:${others.length ? "10px" : "0"}">Your comment <span class="muted">(optional)</span></label>
+                <textarea name="comment_${escapeAttr(q.id)}" rows="2" style="width:100%;font-size:13px;box-sizing:border-box" placeholder="Leave a comment on this question…">${escapeHtml(myComments[q.id] || "")}</textarea>
+              ` : ""}
+            </div>
+          ` : "";
+
+          return `
+            <div class="prev-q" data-qi="${i}">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+                <span style="font-weight:700;font-size:13px;color:#0b7a75">Q${i + 1}</span>
+                <span class="pill" style="font-size:11px">${escapeHtml(qTypeLabel(q.question_type))}</span>
+                <span class="muted small">${escapeHtml(String(q.marks))} mark${Number(q.marks) !== 1 ? "s" : ""}</span>
+              </div>
+              <div style="font-size:15px;line-height:1.65;margin-bottom:12px">${escapeHtml(q.question_text)}</div>
+              ${renderOptions(q)}
+              ${commentBlock}
+            </div>
+          `;
+        }).join("");
+
+      const statusBadge = exam.status === "PUBLISHED"
+        ? `<span class="pill" style="background:#d4f5e9;color:#0b5e4e;font-size:11px">Published</span>`
+        : exam.status === "CLOSED"
+          ? `<span class="pill" style="background:#ffe8e8;color:#c00;font-size:11px">Closed</span>`
+          : `<span class="pill" style="background:rgba(0,0,0,.07);color:rgba(0,0,0,.5);font-size:11px">Draft</span>`;
+
+      const backHref  = (active.role === "TEACHER" || active.role === "SCHOOL_ADMIN")
+        ? `/exam-builder?exam_id=${examId}`
+        : `/approvals`;
+      const backLabel = (active.role === "TEACHER" || active.role === "SCHOOL_ADMIN")
+        ? "&#8592; Exam Builder"
+        : "&#8592; Approval Inbox";
+
+      const approverBanner = isApproverMode ? `
+        <div class="card" style="background:#fff8e1;border:1px solid #f0b840;padding:12px 16px">
+          <p style="margin:0;font-size:14px;font-weight:600">&#128065;&#65039; You are reviewing this exam for the
+            <b>${escapeHtml(GATE_LABEL[activeGateType] || activeGateType)} Gate</b>.
+            Leave comments on individual questions below, then approve or reject at the bottom.
+          </p>
+        </div>
+      ` : "";
+
+      const decisionCard = isApproverMode ? `
+        <div class="card" style="background:#fffbea;border:1px solid #f0c040">
+          <h2 style="margin:0 0 14px">Gate Decision — ${escapeHtml(GATE_LABEL[activeGateType] || activeGateType)} Gate</h2>
+          <label>Overall note <span class="muted">(optional)</span></label>
+          <textarea name="note" rows="3" placeholder="Overall comments for this review…" style="margin-bottom:14px"></textarea>
+          <div style="display:flex;gap:10px">
+            <button name="response" value="APPROVED" type="submit" class="btn2" style="flex:1;font-size:14px;padding:12px">&#10003; Approve</button>
+            <button name="response" value="REJECTED" type="submit" style="flex:1;font-size:14px;padding:12px;border:0;border-radius:10px;background:#ffe8e8;color:#c00;font-weight:700;cursor:pointer">&#10007; Reject</button>
+          </div>
+        </div>
+      ` : "";
+
+      const innerContent = isApproverMode
+        ? `<form method="post" action="/approval-respond-with-comments">
+             <input type="hidden" name="exam_id"   value="${escapeAttr(examId)}" />
+             <input type="hidden" name="gate_type" value="${escapeAttr(activeGateType)}" />
+             ${questionsHtml}
+             ${decisionCard}
+           </form>`
+        : questionsHtml;
+
+      return page(`
+        <style>
+          .prev-q{background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:14px;padding:18px;margin-bottom:12px}
+          .opt-item{display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid rgba(0,0,0,.1);border-radius:8px;margin:5px 0;background:#fafafa}
+          .comment-block{margin-top:14px;padding-top:12px;border-top:1px solid rgba(0,0,0,.07)}
+          .other-comment{background:#f0f7ff;border-radius:8px;padding:8px 12px;margin-bottom:6px}
+        </style>
+        <div class="card" style="margin-bottom:0;border-radius:14px 14px 0 0">
+          <div class="topbar">
+            <div>
+              <div style="font-size:12px;color:rgba(0,0,0,.45);margin-bottom:2px"><a href="${backHref}">${backLabel}</a></div>
+              <h1 style="margin:0">${escapeHtml(exam.title)}</h1>
+              <div class="muted" style="margin-top:4px;font-size:13px">
+                ${escapeHtml(exam.course_title)}${exam.teacher_name ? ` &middot; ${escapeHtml(exam.teacher_name)}` : ""}
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
+              ${statusBadge}
+              <span class="muted small">&#128065;&#65039; Preview</span>
+            </div>
+          </div>
+        </div>
+        ${approverBanner}
+        <div class="card" style="padding:10px 16px;border-radius:0;border-top:none">
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <span class="muted small">${questions.length} question${questions.length !== 1 ? "s" : ""} &middot; ${totalMarks} mark${totalMarks !== 1 ? "s" : ""}</span>
+            <div style="margin-left:auto;display:flex;gap:6px">
+              <button id="btn-all" type="button" onclick="setMode('all')" class="btn2" style="font-size:12px;padding:6px 12px">All questions</button>
+              <button id="btn-one" type="button" onclick="setMode('one')" class="btn3" style="font-size:12px;padding:6px 12px">One at a time</button>
+            </div>
+          </div>
+          <div id="nav-row" style="display:none;align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px">
+            <button type="button" onclick="prevQ()" class="btn3" style="font-size:13px;padding:7px 14px">&#8592; Previous</button>
+            <span id="q-counter" style="font-size:13px;color:rgba(0,0,0,.6)">Question 1 of ${questions.length}</span>
+            <button type="button" onclick="nextQ()" class="btn3" style="font-size:13px;padding:7px 14px">Next &#8594;</button>
+          </div>
+        </div>
+        ${innerContent}
+        <script>
+          var cur = 0, total = ${questions.length};
+          function setMode(m) {
+            var qs  = document.querySelectorAll('.prev-q');
+            var all = m === 'all';
+            document.getElementById('btn-all').className = all ? 'btn2' : 'btn3';
+            document.getElementById('btn-one').className = all ? 'btn3' : 'btn2';
+            document.getElementById('btn-all').style.cssText = 'font-size:12px;padding:6px 12px';
+            document.getElementById('btn-one').style.cssText = 'font-size:12px;padding:6px 12px';
+            document.getElementById('nav-row').style.display = all ? 'none' : 'flex';
+            qs.forEach(function(q, i) { q.style.display = all ? '' : (i === cur ? '' : 'none'); });
+            if (!all) updCtr();
+          }
+          function updCtr() {
+            document.getElementById('q-counter').textContent = 'Question ' + (cur + 1) + ' of ' + total;
+          }
+          function prevQ() {
+            if (cur <= 0) return;
+            document.querySelectorAll('.prev-q')[cur].style.display = 'none';
+            cur--;
+            document.querySelectorAll('.prev-q')[cur].style.display = '';
+            updCtr();
+          }
+          function nextQ() {
+            if (cur >= total - 1) return;
+            document.querySelectorAll('.prev-q')[cur].style.display = 'none';
+            cur++;
+            document.querySelectorAll('.prev-q')[cur].style.display = '';
+            updCtr();
+          }
+        </script>
+      `);
+    }
+
+    // ----------------------------------------------------------------
+    // POST /approval-respond-with-comments — save per-question comments
+    //                                        + gate decision
+    // ----------------------------------------------------------------
+    if (path === "/approval-respond-with-comments" && request.method === "POST") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active) return redirect("/choose-school");
+
+      const f = await form();
+      const examId   = (f.exam_id   || "").trim();
+      const gateType = (f.gate_type || "").trim();
+      const response = (f.response  || "").trim();
+      const note     = (f.note      || "").trim() || null;
+
+      if (!examId || !["QUESTIONS","GRADING","RESULTS"].includes(gateType)) {
+        return redirect("/approvals");
+      }
+      if (!["APPROVED","REJECTED"].includes(response)) {
+        return redirect("/approvals");
+      }
+
+      const userId   = r.user.id;
+      const tenantId = active.tenant_id;
+
+      // Validate: assigned approver with a PENDING response
+      const gate = await first(
+        `SELECT id FROM sitting_approval_gates
+         WHERE exam_id=? AND gate_type=? AND user_id=? AND tenant_id=?`,
+        [examId, gateType, userId, tenantId]
+      );
+      if (!gate) return redirect("/approvals");
+
+      const pendingResp = await first(
+        `SELECT id FROM sitting_approval_responses
+         WHERE exam_id=? AND gate_type=? AND approver_id=? AND status='PENDING' AND tenant_id=?`,
+        [examId, gateType, userId, tenantId]
+      );
+      if (!pendingResp) return redirect("/approvals");
+
+      const ts = nowISO();
+
+      // Save per-question comments (fields named comment_[questionId])
+      for (const [key, rawVal] of Object.entries(f)) {
+        if (!key.startsWith("comment_")) continue;
+        const questionId  = key.slice(8);
+        const commentText = (Array.isArray(rawVal) ? rawVal[0] : rawVal || "").trim();
+        if (!commentText) continue;
+
+        // Security: verify the question belongs to this exam + tenant
+        const qRow = await first(
+          `SELECT id FROM exam_questions WHERE id=? AND exam_id=? AND tenant_id=?`,
+          [questionId, examId, tenantId]
+        );
+        if (!qRow) continue;
+
+        const existingCmt = await first(
+          `SELECT id FROM sitting_approval_comments
+           WHERE exam_id=? AND gate_type=? AND question_id=? AND approver_id=? AND tenant_id=?`,
+          [examId, gateType, questionId, userId, tenantId]
+        );
+        if (existingCmt) {
+          await run(
+            `UPDATE sitting_approval_comments SET comment=?, updated_at=? WHERE id=?`,
+            [commentText, ts, existingCmt.id]
+          );
+        } else {
+          await run(
+            `INSERT INTO sitting_approval_comments (id, exam_id, gate_type, question_id, approver_id, tenant_id, comment, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [uuid(), examId, gateType, questionId, userId, tenantId, commentText, ts, ts]
+          );
+        }
+      }
+
+      // Update gate response (PENDING row is verified above)
+      await run(
+        `UPDATE sitting_approval_responses SET status=?, note=?, updated_at=? WHERE id=?`,
+        [response, note, ts, pendingResp.id]
+      );
 
       return redirect("/approvals");
     }
