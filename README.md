@@ -49,7 +49,11 @@ A **multi-tenant exam taking platform for schools.**
 functions/
   [[path]].js       → Entry point router — directs traffic to correct handler
   shared.js         → All shared helpers (auth, DB, crypto, cookies, HTML) + recalcAttempt
-  app.js            → User, auth, school, admin routes (to be split in Phase 9)
+  auth.js           → Login, logout, setup, profile, join, choose-school, switch-school, /
+  sys.js            → System Admin routes (/sys, /sys-create-school, /sys-add-member)
+  admin.js          → School Admin routes (/school, /school-*)
+  teacher.js        → Teacher dashboard (/teacher)
+  student.js        → Student dashboard (/student)
   exams.js          → Exam builder routes + teacher results pane + grading screen
   question-bank.js  → Question bank routes
   attempts.js       → Exam taking engine routes (student)
@@ -67,12 +71,6 @@ The double brackets are **required by Cloudflare Pages** — it's their syntax f
 
 ### Routing Logic in [[path]].js
 ```
-/question-bank, /qbank-*                → question-bank.js
-/exam-create, /exam-builder,
-/exam-save-settings, /exam-*,
-/exam-bank-picker, /exam-add-from-bank,
-/exam-grade, /exam-results-csv,
-/exam-gate-submit                       → exams.js
 /attempt-start, /attempt-take,
 /attempt-complete                       → attempts.js
 /attempt-results, /attempt-review,
@@ -86,7 +84,23 @@ The double brackets are **required by Cloudflare Pages** — it's their syntax f
 /approvals, /approval-respond,
 /exam-preview,
 /approval-respond-with-comments         → sittings.js
-everything else                         → app.js
+/question-bank, /qbank-*               → question-bank.js
+/exam-create, /exam-builder,
+/exam-save-settings, /exam-*,
+/exam-bank-picker, /exam-add-from-bank,
+/exam-grade, /exam-results-csv,
+/exam-gate-submit                       → exams.js
+/sys, /sys-*                            → sys.js
+/school, /school-sittings,
+/school-courses, /school-classes,
+/school-people, /school-join-codes,
+/school-*                               → admin.js
+/teacher                                → teacher.js
+/student                                → student.js
+everything else (/, /login, /logout,
+/setup, /profile, /join, /join-*,
+/choose-school, /switch-school,
+/no-access, /health)                    → auth.js
 ```
 
 ---
@@ -192,7 +206,18 @@ idx_exam_answers_question_id
 ## 🏗️ Dashboards Built
 
 ### System Admin (`/sys`) — COMPLETE
-### School Admin (`/school`) — COMPLETE (including Class management + Sittings section + pending approvals banner)
+### School Admin — COMPLETE — 6 pages with shared nav bar
+| Page | Route | Content |
+|---|---|---|
+| Overview | `/school` | Stats (students, teachers, courses, classes, sittings), pending approvals banner, pending join requests banner |
+| Sittings | `/school-sittings` | Sittings table, new sitting button |
+| Courses | `/school-courses` | Courses list, create course, assign teacher, enrol student, course rosters with remove buttons |
+| Classes | `/school-classes` | Classes table, create class form, Manage links to `/school-class` detail page |
+| People | `/school-people` | Members table with role update + remove, add user manually form |
+| Join Codes | `/school-join-codes` | Create join code, existing codes table, pending requests (approve/reject), history |
+
+Each page includes the shared top header card (school name, role, switch/profile/logout) and a nav bar (Overview | Sittings | Courses | Classes | People | Join Codes) with the active section highlighted. Nav bar implemented as `schoolNav(activePath)` local helper in `admin.js`.
+
 ### Teacher (`/teacher`) — COMPLETE (with exam builder + question bank + sitting badge + approvals pane + pending approvals banner)
 ### Student (`/student`) — COMPLETE (with My Sittings section)
 
@@ -604,15 +629,18 @@ Optional sign-off checkpoints per exam paper. Admin configures which gates are a
 
 ## ⏳ What Comes Next (In Order)
 
-### Phase 9 — Admin Dashboard Restructure + app.js split
-- [ ] Split `app.js` into `admin.js`, `teacher.js`, `student.js`
-- [ ] School Admin dashboard restructured into proper navigation sections:
-  - Overview (key stats)
-  - Sittings
-  - Courses
-  - Classes
-  - People
-  - Join Codes
+### Phase 9 — Admin Dashboard Restructure + app.js split ✅ COMPLETE
+- [x] Split `app.js` into `auth.js`, `sys.js`, `admin.js`, `teacher.js`, `student.js`
+- [x] School Admin dashboard restructured into 6 separate pages with shared nav bar:
+  - `/school` — Overview (stats, banners)
+  - `/school-sittings` — Sittings
+  - `/school-courses` — Courses, rosters, assign/enrol
+  - `/school-classes` — Classes, create, manage
+  - `/school-people` — Members, roles, add user
+  - `/school-join-codes` — Join codes, requests
+
+### Phase 9.5 — Grading Gate Approver Review Page
+- [ ] Dedicated approver review page for the GRADING gate (similar to exam-preview for the QUESTIONS gate)
 
 ### Phase 10 — Question Bank Bulk Import (CSV/Excel)
 
@@ -641,7 +669,9 @@ Optional sign-off checkpoints per exam paper. Admin configures which gates are a
 
 ## 💡 Important Decisions & Preferences
 
-- **Modular file structure** — shared.js, app.js, exams.js, question-bank.js, attempts.js, results.js, sittings.js
+- **Modular file structure** — shared.js, auth.js, sys.js, admin.js, teacher.js, student.js, exams.js, question-bank.js, attempts.js, results.js, sittings.js
+- **app.js split into auth.js, sys.js, admin.js, teacher.js, student.js in Phase 9** — each handler file owns its own routes, [[path]].js is pure routing with no logic
+- **School Admin dashboard restructured into 6 separate pages in Phase 9** — /school (overview), /school-sittings, /school-courses, /school-classes, /school-people, /school-join-codes; shared nav bar via schoolNav(activePath) helper in admin.js
 - **No third party auth** — custom built
 - **SQLite via D1** — TEXT for IDs and timestamps
 - **PBKDF2** passwords, 40,000 iterations, pepper from `env.APP_SECRET`
@@ -707,4 +737,4 @@ APP_SECRET   → pepper for password hashing (set in Cloudflare Pages settings)
 
 ---
 
-*Last updated: 2026-03-09. Phase 8c complete (Approval Inbox). Phase 8b.2 complete (Exam Preview Page + Approver Review with per-question comments). Next: Phase 8b.2 testing, then Phase 9 (Admin Dashboard Restructure).*
+*Last updated: 2026-03-09. Phase 9 complete (app.js split + School Admin dashboard restructured into 6 pages). Next: Phase 9.5 (Grading gate approver review page).*
