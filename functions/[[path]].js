@@ -98,6 +98,11 @@ export async function onRequest(ctx) {
   // School Admin routes
   if (
     path === "/school" ||
+    path === "/school-sittings" ||
+    path === "/school-courses" ||
+    path === "/school-classes" ||
+    path === "/school-people" ||
+    path === "/school-join-codes" ||
     path.startsWith("/school-")
   ) {
     return handleAdminRequest(ctx);
