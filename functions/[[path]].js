@@ -31,7 +31,7 @@ export async function onRequest(ctx) {
     return handleResultsRequest(ctx);
   }
 
-  // Sittings routes (School Admin tool)
+  // Sittings routes (School Admin tool) + Approval Inbox
   if (
     path === "/sittings" ||
     path === "/sitting-builder" ||
@@ -41,7 +41,9 @@ export async function onRequest(ctx) {
     path === "/sitting-remove-paper" ||
     path === "/sitting-gate-save" ||
     path === "/sitting-gate-remove-approver" ||
-    path === "/sitting-gate-settings"
+    path === "/sitting-gate-settings" ||
+    path === "/approvals" ||
+    path === "/approval-respond"
   ) {
     return handleSittingRequest(ctx);
   }

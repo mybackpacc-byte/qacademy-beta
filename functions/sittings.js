@@ -1,9 +1,10 @@
 // functions/sittings.js
-// Exam Sittings — School Admin tool
+// Exam Sittings — School Admin tool + Approval Inbox
 // Routes: /sittings, /sitting-builder, /sitting-create,
 //         /sitting-save-settings, /sitting-add-paper, /sitting-remove-paper,
 //         /sitting-gate-save, /sitting-gate-remove-approver,
-//         /sitting-gate-settings
+//         /sitting-gate-settings,
+//         /approvals, /approval-respond
 
 import { createHelpers } from "./shared.js";
 
@@ -1029,6 +1030,206 @@ export async function handleSittingRequest(ctx) {
           })();
         </script>
       `);
+    }
+
+    // ----------------------------------------------------------------
+    // GET /approvals — Approval Inbox (any logged-in school user)
+    // ----------------------------------------------------------------
+    if (path === "/approvals" && request.method === "GET") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active) return redirect("/choose-school");
+
+      const userId   = r.user.id;
+      const tenantId = active.tenant_id;
+
+      const gateLabel = (t) => {
+        if (t === "QUESTIONS") return "Questions Gate";
+        if (t === "GRADING")   return "Grading Gate";
+        if (t === "RESULTS")   return "Results Gate";
+        return t;
+      };
+      const gateIcon = (t) => {
+        if (t === "QUESTIONS") return "&#128221;";
+        if (t === "GRADING")   return "&#9999;&#65039;";
+        return "&#128202;";
+      };
+
+      // Gates where this user has a PENDING response
+      const pendingItems = await all(
+        `SELECT sag.exam_id, sag.gate_type, sag.sitting_id,
+                e.title AS exam_title,
+                es.title AS sitting_title,
+                u.name AS submitter_name
+         FROM sitting_approval_gates sag
+         JOIN sitting_approval_responses sar
+           ON sar.exam_id=sag.exam_id AND sar.gate_type=sag.gate_type
+          AND sar.approver_id=sag.user_id AND sar.tenant_id=sag.tenant_id
+         JOIN exams e ON e.id=sag.exam_id
+         LEFT JOIN exam_sittings es ON es.id=sag.sitting_id
+         LEFT JOIN users u ON u.id=e.created_by
+         WHERE sag.user_id=? AND sag.tenant_id=? AND sar.status='PENDING'
+         ORDER BY sar.created_at ASC`,
+        [userId, tenantId]
+      );
+
+      // Gates where this user has already responded
+      const recentItems = await all(
+        `SELECT sag.exam_id, sag.gate_type, sag.sitting_id,
+                e.title AS exam_title,
+                es.title AS sitting_title,
+                u.name AS submitter_name,
+                sar.status AS my_status,
+                sar.note AS my_note,
+                sar.updated_at AS responded_at
+         FROM sitting_approval_gates sag
+         JOIN sitting_approval_responses sar
+           ON sar.exam_id=sag.exam_id AND sar.gate_type=sag.gate_type
+          AND sar.approver_id=sag.user_id AND sar.tenant_id=sag.tenant_id
+         JOIN exams e ON e.id=sag.exam_id
+         LEFT JOIN exam_sittings es ON es.id=sag.sitting_id
+         LEFT JOIN users u ON u.id=e.created_by
+         WHERE sag.user_id=? AND sag.tenant_id=? AND sar.status IN ('APPROVED','REJECTED')
+         ORDER BY sar.updated_at DESC LIMIT 30`,
+        [userId, tenantId]
+      );
+
+      const pendingHtml = pendingItems.length === 0
+        ? `<p class="muted" style="text-align:center;padding:24px 0">&#10003; All clear — no pending approvals.</p>`
+        : pendingItems.map(item => `
+          <div class="card" style="margin-bottom:10px">
+            <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
+              <div style="flex:1;min-width:200px">
+                <div style="font-weight:700;font-size:16px;margin-bottom:3px">${escapeHtml(item.exam_title)}</div>
+                ${item.sitting_title ? `<div class="muted small" style="margin-bottom:4px">&#128203; ${escapeHtml(item.sitting_title)}</div>` : ""}
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+                  <span class="pill" style="background:#fff3e0;color:#a05000;font-size:12px">${gateIcon(item.gate_type)} ${escapeHtml(gateLabel(item.gate_type))}</span>
+                  ${item.submitter_name ? `<span class="muted small">by ${escapeHtml(item.submitter_name)}</span>` : ""}
+                </div>
+                <a href="/exam-builder?exam_id=${escapeAttr(item.exam_id)}&pane=approvals" style="font-size:13px">View exam &#8599;</a>
+              </div>
+              <div style="min-width:240px;flex-shrink:0">
+                <form method="post" action="/approval-respond">
+                  <input type="hidden" name="exam_id"   value="${escapeAttr(item.exam_id)}" />
+                  <input type="hidden" name="gate_type" value="${escapeAttr(item.gate_type)}" />
+                  <label style="font-size:12px;color:rgba(0,0,0,.5);margin-bottom:4px;display:block">Note <span class="muted">(optional)</span></label>
+                  <textarea name="note" rows="2" style="width:100%;font-size:13px;box-sizing:border-box;margin-bottom:8px" placeholder="Add a note..."></textarea>
+                  <div style="display:flex;gap:8px">
+                    <button name="response" value="APPROVED" type="submit" class="btn2" style="flex:1">&#10003; Approve</button>
+                    <button name="response" value="REJECTED" type="submit" style="flex:1;padding:10px 14px;border:0;border-radius:10px;background:#ffe8e8;color:#c00;font-weight:700;cursor:pointer">&#10007; Reject</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+        `).join("");
+
+      const recentHtml = recentItems.length === 0 ? "" : `
+        <div class="card">
+          <h2 style="margin:0 0 14px">Recent</h2>
+          <table class="table">
+            <thead><tr><th>Exam</th><th>Gate</th><th>Response</th><th>Date</th><th>Note</th></tr></thead>
+            <tbody>
+              ${recentItems.map(item => `
+                <tr>
+                  <td>
+                    <b>${escapeHtml(item.exam_title)}</b>
+                    ${item.sitting_title ? `<br/><span class="muted small">&#128203; ${escapeHtml(item.sitting_title)}</span>` : ""}
+                  </td>
+                  <td class="small">${escapeHtml(gateLabel(item.gate_type))}</td>
+                  <td>${item.my_status === "APPROVED"
+                    ? `<span class="pill" style="background:#d4f5e9;color:#0b5e4e;font-size:11px">Approved</span>`
+                    : `<span class="pill" style="background:#ffe8e8;color:#c00;font-size:11px">Rejected</span>`}
+                  </td>
+                  <td class="small muted">${escapeHtml(fmtISO(item.responded_at))}</td>
+                  <td class="small muted">${escapeHtml(item.my_note || "—")}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      `;
+
+      return page(`
+        <div class="card">
+          <div class="topbar">
+            <div>
+              <h1>&#128236; Approval Inbox</h1>
+              <div class="muted">
+                <span class="pill">${escapeHtml(active.tenant_name)}</span>
+                <span class="pill">${escapeHtml(roleLabel(active.role))}</span>
+              </div>
+            </div>
+            <div class="actions">
+              <a href="/">Home</a>
+              <a href="/profile">Profile</a>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <h2 style="margin:0 0 14px">Pending (${pendingItems.length})</h2>
+          ${pendingHtml}
+        </div>
+        ${recentHtml}
+      `);
+    }
+
+    // ----------------------------------------------------------------
+    // POST /approval-respond — submit approve or reject for a gate
+    // ----------------------------------------------------------------
+    if (path === "/approval-respond" && request.method === "POST") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active) return redirect("/choose-school");
+
+      const f = await form();
+      const examId   = (f.exam_id   || "").trim();
+      const gateType = (f.gate_type || "").trim();
+      const response = (f.response  || "").trim();
+      const note     = (f.note      || "").trim() || null;
+
+      if (!examId || !["QUESTIONS","GRADING","RESULTS"].includes(gateType)) {
+        return redirect("/approvals");
+      }
+      if (!["APPROVED","REJECTED"].includes(response)) {
+        return redirect("/approvals");
+      }
+
+      const userId   = r.user.id;
+      const tenantId = active.tenant_id;
+
+      // Validate this user is actually assigned as an approver for this gate
+      const gate = await first(
+        `SELECT id FROM sitting_approval_gates
+         WHERE exam_id=? AND gate_type=? AND user_id=? AND tenant_id=?`,
+        [examId, gateType, userId, tenantId]
+      );
+      if (!gate) return redirect("/approvals");
+
+      const ts = nowISO();
+
+      // Upsert: update existing row or insert a new one
+      const existing = await first(
+        `SELECT id FROM sitting_approval_responses
+         WHERE exam_id=? AND gate_type=? AND approver_id=? AND tenant_id=?`,
+        [examId, gateType, userId, tenantId]
+      );
+      if (existing) {
+        await run(
+          `UPDATE sitting_approval_responses SET status=?, note=?, updated_at=? WHERE id=?`,
+          [response, note, ts, existing.id]
+        );
+      } else {
+        await run(
+          `INSERT INTO sitting_approval_responses (id, exam_id, gate_type, approver_id, status, note, tenant_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [uuid(), examId, gateType, userId, response, note, tenantId, ts, ts]
+        );
+      }
+
+      return redirect("/approvals");
     }
 
     // Fallback
