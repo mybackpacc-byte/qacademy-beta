@@ -40,7 +40,8 @@ export async function onRequest(ctx) {
     path === "/sitting-add-paper" ||
     path === "/sitting-remove-paper" ||
     path === "/sitting-gate-save" ||
-    path === "/sitting-gate-remove-approver"
+    path === "/sitting-gate-remove-approver" ||
+    path === "/sitting-gate-settings"
   ) {
     return handleSittingRequest(ctx);
   }

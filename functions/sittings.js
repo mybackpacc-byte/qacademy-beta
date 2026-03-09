@@ -2,7 +2,8 @@
 // Exam Sittings — School Admin tool
 // Routes: /sittings, /sitting-builder, /sitting-create,
 //         /sitting-save-settings, /sitting-add-paper, /sitting-remove-paper,
-//         /sitting-gate-save, /sitting-gate-remove-approver
+//         /sitting-gate-save, /sitting-gate-remove-approver,
+//         /sitting-gate-settings
 
 import { createHelpers } from "./shared.js";
 
@@ -41,6 +42,13 @@ export async function handleSittingRequest(ctx) {
       if (s === "PUBLISHED") return `<span class="pill" style="background:#d4f5e9;color:#0b5e4e;font-size:11px">Published</span>`;
       if (s === "CLOSED")    return `<span class="pill" style="background:#ffe8e8;color:#c00;font-size:11px">Closed</span>`;
       return `<span class="pill" style="background:rgba(0,0,0,.07);color:rgba(0,0,0,.5);font-size:11px">Draft</span>`;
+    };
+
+    const roleLabel = (role) => {
+      if (role === "SCHOOL_ADMIN") return "School Admin";
+      if (role === "TEACHER")      return "Teacher";
+      if (role === "STUDENT")      return "Student";
+      return role || "";
     };
 
     // ----------------------------------------------------------------
@@ -307,7 +315,7 @@ export async function handleSittingRequest(ctx) {
         }
       }
 
-      return redirect(`/sitting-builder?sitting_id=${sittingId}&tab=approvals`);
+      return redirect(`/sitting-gate-settings?sitting_id=${sittingId}&exam_id=${examId}`);
     }
 
     // ----------------------------------------------------------------
@@ -343,7 +351,7 @@ export async function handleSittingRequest(ctx) {
         [examId, gateType, userId, active.tenant_id]
       );
 
-      return redirect(`/sitting-builder?sitting_id=${sittingId}&tab=approvals`);
+      return redirect(`/sitting-gate-settings?sitting_id=${sittingId}&exam_id=${examId}`);
     }
 
     // ----------------------------------------------------------------
@@ -655,128 +663,68 @@ export async function handleSittingRequest(ctx) {
         </div>`;
 
       // ===== APPROVALS PANE DATA =====
-      // Load all active school members for the approver dropdown
-      const allMembers = await all(
-        `SELECT u.id, u.name, m.role
-         FROM memberships m JOIN users u ON u.id = m.user_id
-         WHERE m.tenant_id=? AND m.status='ACTIVE' AND u.status='ACTIVE'
-         ORDER BY u.name ASC`,
-        [active.tenant_id]
-      );
-
-      const GATE_TYPES = ["QUESTIONS", "GRADING", "RESULTS"];
-      const GATE_LABELS = { QUESTIONS: "📝 Questions", GRADING: "✏️ Grading", RESULTS: "📊 Results" };
-
-      // Build the approvals pane — one section per paper
-      const approvalSections = [];
-      for (const paper of papers) {
-        // Get existing gates for this exam
-        const gates = await all(
-          `SELECT sag.id AS gate_id, sag.gate_type, sag.user_id, u.name AS approver_name
-           FROM sitting_approval_gates sag
-           JOIN users u ON u.id = sag.user_id
-           WHERE sag.exam_id=? AND sag.tenant_id=?
-           ORDER BY sag.gate_type, u.name ASC`,
-          [paper.exam_id, active.tenant_id]
+      // Load gate counts per paper (one query across all papers)
+      let gateCountMap = {};
+      if (papers.length > 0) {
+        const examIds = papers.map(p => p.exam_id);
+        const ph = examIds.map(() => "?").join(",");
+        const gateCounts = await all(
+          `SELECT exam_id, gate_type, COUNT(*) AS cnt
+           FROM sitting_approval_gates
+           WHERE tenant_id=? AND exam_id IN (${ph})
+           GROUP BY exam_id, gate_type`,
+          [active.tenant_id, ...examIds]
         );
-
-        // Group gates by type
-        const gatesByType = {};
-        for (const g of gates) {
-          if (!gatesByType[g.gate_type]) gatesByType[g.gate_type] = [];
-          gatesByType[g.gate_type].push(g);
+        for (const row of gateCounts) {
+          if (!gateCountMap[row.exam_id]) gateCountMap[row.exam_id] = {};
+          gateCountMap[row.exam_id][row.gate_type] = Number(row.cnt);
         }
-
-        const gateBlocks = GATE_TYPES.map(gateType => {
-          const assignees = gatesByType[gateType] || [];
-          const isEnabled = assignees.length > 0;
-
-          // Assigned approvers list
-          const approverRows = assignees.map(a => `
-            <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(0,0,0,.05)">
-              <span style="font-size:13px">${escapeHtml(a.approver_name)}</span>
-              <form method="post" action="/sitting-gate-remove-approver" style="margin:0">
-                <input type="hidden" name="sitting_id" value="${escapeAttr(sittingId)}" />
-                <input type="hidden" name="exam_id"    value="${escapeAttr(paper.exam_id)}" />
-                <input type="hidden" name="gate_type"  value="${escapeAttr(gateType)}" />
-                <input type="hidden" name="user_id"    value="${escapeAttr(a.user_id)}" />
-                <button type="submit" class="btn3" style="padding:2px 8px;font-size:11px">Remove</button>
-              </form>
-            </div>`).join("");
-
-          // Dropdown: members not already assigned to this gate
-          const assignedIds = new Set(assignees.map(a => a.user_id));
-          const availableMembers = allMembers.filter(m => !assignedIds.has(m.id));
-          const memberOptions = availableMembers.map(m =>
-            `<option value="${escapeAttr(m.id)}">${escapeHtml(m.name)}</option>`
-          ).join("");
-
-          return `
-            <div style="border:1px solid rgba(0,0,0,.09);border-radius:10px;padding:12px 14px;margin-bottom:10px">
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-                <span style="font-weight:700;font-size:14px">${GATE_LABELS[gateType]}</span>
-                ${isEnabled
-                  ? `<form method="post" action="/sitting-gate-save" style="margin:0">
-                       <input type="hidden" name="sitting_id" value="${escapeAttr(sittingId)}" />
-                       <input type="hidden" name="exam_id"    value="${escapeAttr(paper.exam_id)}" />
-                       <input type="hidden" name="gate_type"  value="${escapeAttr(gateType)}" />
-                       <input type="hidden" name="enabled"    value="0" />
-                       <button type="submit" class="btn3" style="font-size:11px;padding:3px 9px;background:#ffe8e8;color:#c00;border-color:#f5c6c6"
-                               onclick="return confirm('Turn off this gate? All assigned approvers and pending responses will be removed.')">Turn Off</button>
-                     </form>`
-                  : `<span style="font-size:12px;color:rgba(0,0,0,.4)">Off</span>`
-                }
-              </div>
-
-              ${isEnabled ? `
-                <div style="margin-bottom:8px">
-                  ${approverRows || `<p class="muted small" style="margin:4px 0">No approvers assigned.</p>`}
-                </div>
-                ${availableMembers.length > 0 ? `
-                  <form method="post" action="/sitting-gate-save" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:6px">
-                    <input type="hidden" name="sitting_id" value="${escapeAttr(sittingId)}" />
-                    <input type="hidden" name="exam_id"    value="${escapeAttr(paper.exam_id)}" />
-                    <input type="hidden" name="gate_type"  value="${escapeAttr(gateType)}" />
-                    <input type="hidden" name="enabled"    value="1" />
-                    <select name="user_id" required style="flex:1;min-width:160px;font-size:13px">
-                      <option value="">— add approver —</option>
-                      ${memberOptions}
-                    </select>
-                    <button type="submit" class="btn3" style="font-size:12px;padding:5px 10px">+ Add</button>
-                  </form>
-                ` : `<p class="muted small" style="margin:4px 0">All school members are already assigned.</p>`}
-              ` : `
-                <form method="post" action="/sitting-gate-save" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-                  <input type="hidden" name="sitting_id" value="${escapeAttr(sittingId)}" />
-                  <input type="hidden" name="exam_id"    value="${escapeAttr(paper.exam_id)}" />
-                  <input type="hidden" name="gate_type"  value="${escapeAttr(gateType)}" />
-                  <input type="hidden" name="enabled"    value="1" />
-                  <select name="user_id" required style="flex:1;min-width:160px;font-size:13px">
-                    <option value="">— add first approver to enable —</option>
-                    ${allMembers.map(m => `<option value="${escapeAttr(m.id)}">${escapeHtml(m.name)}</option>`).join("")}
-                  </select>
-                  <button type="submit" class="btn3" style="font-size:12px;padding:5px 10px">Enable &amp; Add</button>
-                </form>
-              `}
-            </div>`;
-        }).join("");
-
-        approvalSections.push(`
-          <div class="card">
-            <div style="margin-bottom:12px">
-              <div style="font-size:11px;color:rgba(0,0,0,.4);text-transform:uppercase;letter-spacing:.04em">${escapeHtml(paper.course_title)}</div>
-              <div style="font-weight:700;font-size:15px">${escapeHtml(paper.exam_title)}</div>
-            </div>
-            ${gateBlocks}
-          </div>`);
       }
+
+      const gateBadge = (letter, count) => count > 0
+        ? `<span style="display:inline-block;background:#d4f5e9;color:#0b5e4e;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:700">${letter}:${count}</span>`
+        : `<span style="font-size:12px;color:rgba(0,0,0,.35)">${letter}:0</span>`;
+
+      const approvalRows = papers.map((p, i) => {
+        const cnts = gateCountMap[p.exam_id] || {};
+        const qCnt = cnts["QUESTIONS"] || 0;
+        const gCnt = cnts["GRADING"]   || 0;
+        const rCnt = cnts["RESULTS"]   || 0;
+        return `
+          <tr>
+            <td style="font-weight:700;color:rgba(0,0,0,.35);font-size:13px;width:28px">${i + 1}</td>
+            <td>
+              <b>${escapeHtml(p.exam_title)}</b>
+            </td>
+            <td class="small">${escapeHtml(p.course_title)}</td>
+            <td class="small">${p.teacher_name ? escapeHtml(p.teacher_name) : '<span class="muted">—</span>'}</td>
+            <td style="white-space:nowrap">
+              <span style="display:inline-flex;gap:4px;align-items:center">
+                ${gateBadge("Q", qCnt)}
+                ${gateBadge("G", gCnt)}
+                ${gateBadge("R", rCnt)}
+              </span>
+            </td>
+            <td>
+              <a href="/sitting-gate-settings?sitting_id=${escapeAttr(sittingId)}&exam_id=${escapeAttr(p.exam_id)}"
+                 class="btn3" style="display:inline-block;padding:4px 10px;font-size:12px;text-decoration:none">Set Approvals</a>
+            </td>
+          </tr>`;
+      }).join("");
 
       const approvalsPane = `
         <div id="pane-approvals" class="pane ${activeTab === "approvals" ? "active" : ""}">
-          ${papers.length === 0
-            ? `<div class="card"><p class="muted">No papers in this sitting yet. Add papers in the Papers tab first.</p></div>`
-            : approvalSections.join("")
-          }
+          <div class="card">
+            <h2 style="margin:0 0 14px">Approval Gates</h2>
+            ${papers.length === 0 ? `
+              <p class="muted">No papers in this sitting yet. Add papers in the Papers tab first.</p>
+            ` : `
+              <table class="table">
+                <thead><tr><th>#</th><th>Paper</th><th>Course</th><th>Teacher</th><th>Gates</th><th></th></tr></thead>
+                <tbody>${approvalRows}</tbody>
+              </table>
+            `}
+          </div>
         </div>`;
 
       return page(`
@@ -828,6 +776,235 @@ export async function handleSittingRequest(ctx) {
             u.searchParams.set('tab', name);
             history.replaceState(null, '', u);
           }
+        </script>
+      `);
+    }
+
+    // ----------------------------------------------------------------
+    // GET /sitting-gate-settings — per-paper gate configuration page
+    // ----------------------------------------------------------------
+    if (path === "/sitting-gate-settings" && request.method === "GET") {
+      const { ok, res, r, active } = await requireAdmin();
+      if (!ok) return res;
+
+      const sittingId = url.searchParams.get("sitting_id") || "";
+      const examId    = url.searchParams.get("exam_id")    || "";
+      if (!sittingId || !examId) return redirect("/sittings");
+
+      const sitting = await first(
+        `SELECT id, title FROM exam_sittings WHERE id=? AND tenant_id=?`,
+        [sittingId, active.tenant_id]
+      );
+      if (!sitting) return redirect("/sittings");
+
+      // Verify exam is in this sitting + load paper info
+      const paper = await first(
+        `SELECT e.id AS exam_id, e.title AS exam_title,
+                c.title AS course_title, u.name AS teacher_name
+         FROM exam_sitting_papers esp
+         JOIN exams e ON e.id = esp.exam_id
+         JOIN courses c ON c.id = e.course_id
+         LEFT JOIN users u ON u.id = e.created_by
+         WHERE esp.sitting_id=? AND esp.exam_id=?`,
+        [sittingId, examId]
+      );
+      if (!paper) return redirect(`/sitting-builder?sitting_id=${sittingId}&tab=approvals`);
+
+      // All gates assigned for this exam
+      const assignedGates = await all(
+        `SELECT sag.gate_type, sag.user_id, u.name AS approver_name
+         FROM sitting_approval_gates sag
+         JOIN users u ON u.id = sag.user_id
+         WHERE sag.exam_id=? AND sag.tenant_id=?
+         ORDER BY sag.gate_type, u.name ASC`,
+        [examId, active.tenant_id]
+      );
+      // Group by gate_type
+      const assignedByGate = { QUESTIONS: [], GRADING: [], RESULTS: [] };
+      for (const g of assignedGates) {
+        if (assignedByGate[g.gate_type]) assignedByGate[g.gate_type].push(g);
+      }
+
+      // All active school members with roles
+      const allMembers = await all(
+        `SELECT u.id, u.name, m.role
+         FROM memberships m JOIN users u ON u.id = m.user_id
+         WHERE m.tenant_id=? AND m.status='ACTIVE' AND u.status='ACTIVE'
+         ORDER BY u.name ASC`,
+        [active.tenant_id]
+      );
+      const memberRoleMap = {};
+      for (const m of allMembers) memberRoleMap[m.id] = m.role;
+
+      // Active courses for the filter dropdown
+      const gsPageCourses = await all(
+        `SELECT id, title FROM courses WHERE tenant_id=? AND status='ACTIVE' ORDER BY title ASC`,
+        [active.tenant_id]
+      );
+
+      // Course → teacher links (for JS filtering)
+      const ctLinks = await all(
+        `SELECT ct.course_id, ct.user_id
+         FROM course_teachers ct
+         JOIN courses c ON c.id = ct.course_id AND c.tenant_id=? AND c.status='ACTIVE'`,
+        [active.tenant_id]
+      );
+      const courseTeacherMap = {};
+      for (const ct of ctLinks) {
+        if (!courseTeacherMap[ct.course_id]) courseTeacherMap[ct.course_id] = [];
+        courseTeacherMap[ct.course_id].push(ct.user_id);
+      }
+
+      // JSON payloads for client-side JS
+      const memberDataJson       = JSON.stringify(allMembers.map(m => ({ id: m.id, name: m.name, role: m.role })));
+      const courseTeacherDataJson = JSON.stringify(courseTeacherMap);
+      const assignedJson = JSON.stringify({
+        QUESTIONS: assignedByGate.QUESTIONS.map(a => a.user_id),
+        GRADING:   assignedByGate.GRADING.map(a => a.user_id),
+        RESULTS:   assignedByGate.RESULTS.map(a => a.user_id),
+      });
+
+      const courseFilterOptions = gsPageCourses.map(c =>
+        `<option value="${escapeAttr(c.id)}">${escapeHtml(c.title)}</option>`
+      ).join("");
+
+      const GATE_DEFS = [
+        { type: "QUESTIONS", label: "📝 Questions Gate", desc: "Must be approved before the exam can be published" },
+        { type: "GRADING",   label: "✏️ Grading Gate",   desc: "Must be approved before results can be released" },
+        { type: "RESULTS",   label: "📊 Results Gate",   desc: "Final sign-off before results go live to students" },
+      ];
+
+      const gateCards = GATE_DEFS.map(def => {
+        const assignees = assignedByGate[def.type] || [];
+        const isActive  = assignees.length > 0;
+
+        const approverRows = assignees.map(a => {
+          const role = memberRoleMap[a.user_id] || "";
+          return `
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid rgba(0,0,0,.06)">
+              <div>
+                <span style="font-size:13px;font-weight:600">${escapeHtml(a.approver_name)}</span>
+                ${role ? `<span class="muted small" style="margin-left:6px">${escapeHtml(roleLabel(role))}</span>` : ""}
+              </div>
+              <form method="post" action="/sitting-gate-remove-approver" style="margin:0">
+                <input type="hidden" name="sitting_id" value="${escapeAttr(sittingId)}" />
+                <input type="hidden" name="exam_id"    value="${escapeAttr(examId)}" />
+                <input type="hidden" name="gate_type"  value="${escapeAttr(def.type)}" />
+                <input type="hidden" name="user_id"    value="${escapeAttr(a.user_id)}" />
+                <button type="submit" class="btn3" style="padding:2px 8px;font-size:11px">Remove</button>
+              </form>
+            </div>`;
+        }).join("");
+
+        return `
+          <div class="card">
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:4px">
+              <span style="font-weight:700;font-size:15px">${def.label}</span>
+              ${isActive
+                ? `<span style="background:#d4f5e9;color:#0b5e4e;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:700">Active</span>`
+                : `<span style="background:rgba(0,0,0,.06);color:rgba(0,0,0,.4);padding:3px 10px;border-radius:999px;font-size:12px">Inactive</span>`
+              }
+            </div>
+            <p class="muted small" style="margin:0 0 12px">${def.desc}</p>
+
+            ${isActive ? `
+              <div style="margin-bottom:12px">
+                ${approverRows}
+              </div>
+            ` : `
+              <p class="muted" style="font-style:italic;margin:0 0 12px">No approvers assigned — gate inactive</p>
+            `}
+
+            <div style="border-top:1px solid rgba(0,0,0,.07);padding-top:12px">
+              <div class="section-title" style="font-size:11px;font-weight:700;color:rgba(0,0,0,.45);text-transform:uppercase;letter-spacing:.05em;margin:0 0 8px">Add approver</div>
+              <form method="post" action="/sitting-gate-save">
+                <input type="hidden" name="sitting_id" value="${escapeAttr(sittingId)}" />
+                <input type="hidden" name="exam_id"    value="${escapeAttr(examId)}" />
+                <input type="hidden" name="gate_type"  value="${escapeAttr(def.type)}" />
+                <input type="hidden" name="enabled"    value="1" />
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+                  <div style="flex:1;min-width:160px">
+                    <label style="font-size:12px;color:rgba(0,0,0,.5);display:block;margin-bottom:4px">Course filter</label>
+                    <select id="course-filter-${def.type}" style="width:100%;font-size:13px"
+                            onchange="filterApprovers('${def.type}')">
+                      <option value="">All courses</option>
+                      ${courseFilterOptions}
+                    </select>
+                  </div>
+                  <div style="flex:2;min-width:180px">
+                    <label style="font-size:12px;color:rgba(0,0,0,.5);display:block;margin-bottom:4px">Approver</label>
+                    <select id="user-sel-${def.type}" name="user_id" required style="width:100%;font-size:13px">
+                      <option value="">— loading… —</option>
+                    </select>
+                  </div>
+                  <button type="submit" class="btn2" style="font-size:13px;padding:8px 14px">+ Add</button>
+                </div>
+              </form>
+            </div>
+          </div>`;
+      }).join("");
+
+      return page(`
+        <div class="card">
+          <div class="topbar">
+            <div>
+              <div style="font-size:13px;color:rgba(0,0,0,.45);margin-bottom:4px">
+                <a href="/sitting-builder?sitting_id=${escapeAttr(sittingId)}&tab=approvals">&#8592; ${escapeHtml(sitting.title)}</a>
+              </div>
+              <h1 style="margin:0">${escapeHtml(paper.exam_title)}</h1>
+              <div class="muted" style="margin-top:4px;font-size:13px">
+                ${escapeHtml(paper.course_title)}${paper.teacher_name ? ` &middot; ${escapeHtml(paper.teacher_name)}` : ""}
+              </div>
+            </div>
+            <div class="actions">
+              <a href="/sitting-builder?sitting_id=${escapeAttr(sittingId)}&tab=approvals">&#8592; Approvals</a>
+              <a href="/school">School Admin</a>
+            </div>
+          </div>
+        </div>
+        ${gateCards}
+        <script>
+          (function() {
+            const MEMBERS = ${memberDataJson};
+            const COURSE_TEACHERS = ${courseTeacherDataJson};
+            const ASSIGNED = ${assignedJson};
+
+            function roleLabel(r) {
+              if (r === 'SCHOOL_ADMIN') return 'School Admin';
+              if (r === 'TEACHER')      return 'Teacher';
+              if (r === 'STUDENT')      return 'Student';
+              return r || '';
+            }
+
+            function escOpt(s) {
+              return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+            }
+
+            window.filterApprovers = function(gateType) {
+              const courseId  = (document.getElementById('course-filter-' + gateType) || {}).value || '';
+              const sel       = document.getElementById('user-sel-' + gateType);
+              if (!sel) return;
+              const assigned  = new Set(ASSIGNED[gateType] || []);
+              let members = MEMBERS.filter(m => !assigned.has(m.id));
+              if (courseId) {
+                const teacherIds = new Set(COURSE_TEACHERS[courseId] || []);
+                members = members.filter(m => teacherIds.has(m.id));
+              }
+              if (members.length === 0) {
+                sel.innerHTML = '<option value="">No eligible approvers available</option>';
+              } else {
+                sel.innerHTML = '<option value="">&#8212; select approver &#8212;</option>' +
+                  members.map(m =>
+                    '<option value="' + escOpt(m.id) + '">' +
+                    escOpt(m.name) + ' \u2014 ' + escOpt(roleLabel(m.role)) +
+                    '</option>'
+                  ).join('');
+              }
+            };
+
+            // Initialise all three dropdowns on page load
+            ['QUESTIONS', 'GRADING', 'RESULTS'].forEach(function(g) { filterApprovers(g); });
+          })();
         </script>
       `);
     }
