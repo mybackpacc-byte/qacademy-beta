@@ -1931,19 +1931,6 @@ export async function handleAppRequest(ctx) {
         ? cards.join("")
         : `<div class="card"><p class="muted" style="text-align:center;padding:24px 0">No exams available yet. Check back later.</p></div>`;
 
-      const _studentPaCnt = await first(
-        `SELECT COUNT(*) AS cnt FROM sitting_approval_gates sag
-         JOIN sitting_approval_responses sar
-           ON sar.exam_id=sag.exam_id AND sar.gate_type=sag.gate_type
-          AND sar.approver_id=sag.user_id AND sar.tenant_id=sag.tenant_id
-         WHERE sag.user_id=? AND sag.tenant_id=? AND sar.status='PENDING'`,
-        [userId, tenantId]
-      );
-      const _studentPaNum = Number((_studentPaCnt || {}).cnt);
-      const studentApprovalBanner = _studentPaNum > 0
-        ? `<div class="card" style="background:#fffbea;border:1px solid #f0c040;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;flex-wrap:wrap"><span style="font-weight:600;font-size:14px">&#128236; You have ${_studentPaNum} pending approval${_studentPaNum !== 1 ? "s" : ""}</span><a href="/approvals" class="btn2" style="display:inline-block;text-decoration:none;padding:7px 14px;font-size:13px;white-space:nowrap">View Inbox &#8594;</a></div>`
-        : "";
-
       return page(`
         <style>
           .badge-upcoming{background:#f0f0f0;color:#555}
@@ -1967,7 +1954,6 @@ export async function handleAppRequest(ctx) {
             </div>
           </div>
         </div>
-        ${studentApprovalBanner}
         ${mySittingsHtml}
         <h2 style="margin:24px 0 12px">My Exams</h2>
         ${examListHtml}
