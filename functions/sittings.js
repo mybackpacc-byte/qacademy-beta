@@ -842,6 +842,12 @@ export async function handleSittingRequest(ctx) {
         [active.tenant_id]
       );
 
+      // Distinct roles for the role filter dropdown (dynamic — no hardcoding)
+      const distinctRoles = await all(
+        `SELECT DISTINCT role FROM memberships WHERE tenant_id=? AND status='ACTIVE' ORDER BY role ASC`,
+        [active.tenant_id]
+      );
+
       // Course → teacher links (for JS filtering)
       const ctLinks = await all(
         `SELECT ct.course_id, ct.user_id
@@ -866,6 +872,10 @@ export async function handleSittingRequest(ctx) {
 
       const courseFilterOptions = gsPageCourses.map(c =>
         `<option value="${escapeAttr(c.id)}">${escapeHtml(c.title)}</option>`
+      ).join("");
+
+      const roleFilterOptions = distinctRoles.map(r =>
+        `<option value="${escapeAttr(r.role)}">${escapeHtml(roleLabel(r.role))}</option>`
       ).join("");
 
       const GATE_DEFS = [
@@ -923,12 +933,20 @@ export async function handleSittingRequest(ctx) {
                 <input type="hidden" name="gate_type"  value="${escapeAttr(def.type)}" />
                 <input type="hidden" name="enabled"    value="1" />
                 <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-                  <div style="flex:1;min-width:160px">
+                  <div style="flex:1;min-width:140px">
                     <label style="font-size:12px;color:rgba(0,0,0,.5);display:block;margin-bottom:4px">Course filter</label>
                     <select id="course-filter-${def.type}" style="width:100%;font-size:13px"
                             onchange="filterApprovers('${def.type}')">
                       <option value="">All courses</option>
                       ${courseFilterOptions}
+                    </select>
+                  </div>
+                  <div style="flex:1;min-width:130px">
+                    <label style="font-size:12px;color:rgba(0,0,0,.5);display:block;margin-bottom:4px">Role filter</label>
+                    <select id="role-filter-${def.type}" style="width:100%;font-size:13px"
+                            onchange="filterApprovers('${def.type}')">
+                      <option value="">All roles</option>
+                      ${roleFilterOptions}
                     </select>
                   </div>
                   <div style="flex:2;min-width:180px">
@@ -982,6 +1000,7 @@ export async function handleSittingRequest(ctx) {
 
             window.filterApprovers = function(gateType) {
               const courseId  = (document.getElementById('course-filter-' + gateType) || {}).value || '';
+              const roleVal   = (document.getElementById('role-filter-'   + gateType) || {}).value || '';
               const sel       = document.getElementById('user-sel-' + gateType);
               if (!sel) return;
               const assigned  = new Set(ASSIGNED[gateType] || []);
@@ -989,6 +1008,9 @@ export async function handleSittingRequest(ctx) {
               if (courseId) {
                 const teacherIds = new Set(COURSE_TEACHERS[courseId] || []);
                 members = members.filter(m => teacherIds.has(m.id));
+              }
+              if (roleVal) {
+                members = members.filter(m => m.role === roleVal);
               }
               if (members.length === 0) {
                 sel.innerHTML = '<option value="">No eligible approvers available</option>';
