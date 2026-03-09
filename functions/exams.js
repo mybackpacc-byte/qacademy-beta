@@ -130,6 +130,37 @@ export async function handleExamRequest(ctx) {
     }
 
     // =============================
+    // Helper: gate status
+    // Returns APPROVED | REJECTED | PENDING | NOT_CONFIGURED
+    // =============================
+    async function getGateStatus(examId, gateType, tenantId) {
+      const assignees = await all(
+        `SELECT user_id FROM sitting_approval_gates WHERE exam_id=? AND gate_type=? AND tenant_id=?`,
+        [examId, gateType, tenantId]
+      );
+      if (assignees.length === 0) return "NOT_CONFIGURED";
+
+      const responses = await all(
+        `SELECT approver_id, status FROM sitting_approval_responses
+         WHERE exam_id=? AND gate_type=? AND tenant_id=?`,
+        [examId, gateType, tenantId]
+      );
+      const responseMap = {};
+      for (const r of responses) responseMap[r.approver_id] = r.status;
+
+      let anyRejected = false;
+      let allApproved = true;
+      for (const a of assignees) {
+        const s = responseMap[a.user_id] || "PENDING";
+        if (s === "REJECTED") anyRejected = true;
+        if (s !== "APPROVED") allApproved = false;
+      }
+      if (anyRejected) return "REJECTED";
+      if (allApproved) return "APPROVED";
+      return "PENDING";
+    }
+
+    // =============================
     // Shared UI helpers
     // =============================
     const qTypeLabel = (t) => {
@@ -171,6 +202,74 @@ export async function handleExamRequest(ctx) {
         [examId, active.tenant_id, courseId, r.user.id, title, ts, ts]
       );
       return redirect(`/exam-builder?exam_id=${examId}`);
+    }
+
+    // =============================
+    // POST /exam-gate-submit — teacher submits a gate for approval
+    // =============================
+    if (path === "/exam-gate-submit" && request.method === "POST") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active || active.role !== "TEACHER") return redirect("/");
+
+      const f = await form();
+      const examId   = (f.exam_id   || "").trim();
+      const gateType = (f.gate_type || "").trim();
+
+      if (!examId || !["QUESTIONS","GRADING","RESULTS"].includes(gateType)) {
+        return redirect("/teacher");
+      }
+
+      const exam = await verifyExamAccess(examId, active.tenant_id, r.user.id, active.role);
+      if (!exam) return redirect("/teacher");
+
+      // Validate submission rules
+      if (gateType === "GRADING") {
+        // All submitted attempts must be FULLY_GRADED
+        const ungraded = await first(
+          `SELECT COUNT(*) AS cnt FROM exam_attempts
+           WHERE exam_id=? AND tenant_id=? AND status='SUBMITTED' AND grading_status != 'FULLY_GRADED'`,
+          [examId, active.tenant_id]
+        );
+        if (ungraded && Number(ungraded.cnt) > 0) {
+          return redirect(`/exam-builder?exam_id=${examId}&pane=approvals&gate_error=grading_not_complete`);
+        }
+      }
+
+      if (gateType === "RESULTS") {
+        // GRADING gate must be APPROVED (or NOT_CONFIGURED)
+        const gradingStatus = await getGateStatus(examId, "GRADING", active.tenant_id);
+        if (gradingStatus !== "APPROVED" && gradingStatus !== "NOT_CONFIGURED") {
+          return redirect(`/exam-builder?exam_id=${examId}&pane=approvals&gate_error=grading_gate_required`);
+        }
+      }
+
+      // Get all assigned approvers for this gate
+      const assignees = await all(
+        `SELECT user_id FROM sitting_approval_gates WHERE exam_id=? AND gate_type=? AND tenant_id=?`,
+        [examId, gateType, active.tenant_id]
+      );
+      if (assignees.length === 0) {
+        return redirect(`/exam-builder?exam_id=${examId}&pane=approvals`);
+      }
+
+      const ts = nowISO();
+      // Delete any existing responses (resubmission after rejection)
+      await run(
+        `DELETE FROM sitting_approval_responses WHERE exam_id=? AND gate_type=? AND tenant_id=?`,
+        [examId, gateType, active.tenant_id]
+      );
+      // Insert fresh PENDING responses for all assignees
+      for (const a of assignees) {
+        await run(
+          `INSERT INTO sitting_approval_responses (id, exam_id, gate_type, approver_id, status, tenant_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?)`,
+          [uuid(), examId, gateType, a.user_id, active.tenant_id, ts, ts]
+        );
+      }
+
+      return redirect(`/exam-builder?exam_id=${examId}&pane=approvals`);
     }
 
     // =============================
@@ -339,6 +438,51 @@ export async function handleExamRequest(ctx) {
          WHERE esp.exam_id=?`,
         [examId]
       );
+
+      // ── Approval gates data ──
+      const GATE_TYPES_ORDERED = ["QUESTIONS", "GRADING", "RESULTS"];
+      const GATE_LABEL_MAP = { QUESTIONS: "📝 Questions", GRADING: "✏️ Grading", RESULTS: "📊 Results" };
+
+      // All configured gates for this exam (any gate_type)
+      const allGates = await all(
+        `SELECT sag.gate_type, sag.user_id, u.name AS approver_name
+         FROM sitting_approval_gates sag
+         JOIN users u ON u.id = sag.user_id
+         WHERE sag.exam_id=? AND sag.tenant_id=?
+         ORDER BY sag.gate_type, u.name ASC`,
+        [examId, active.tenant_id]
+      );
+      const configuredGateTypes = [...new Set(allGates.map(g => g.gate_type))];
+      const hasAnyGate = configuredGateTypes.length > 0;
+
+      // All responses for this exam
+      const allResponses = await all(
+        `SELECT approver_id, gate_type, status, note
+         FROM sitting_approval_responses
+         WHERE exam_id=? AND tenant_id=?`,
+        [examId, active.tenant_id]
+      );
+      // responseMap[gateType][approver_id] = {status, note}
+      const responseMap = {};
+      for (const resp of allResponses) {
+        if (!responseMap[resp.gate_type]) responseMap[resp.gate_type] = {};
+        responseMap[resp.gate_type][resp.approver_id] = { status: resp.status, note: resp.note };
+      }
+
+      // Compute gate statuses (used for both pane rendering and publish enforcement)
+      const gateStatuses = {};
+      for (const gt of GATE_TYPES_ORDERED) {
+        gateStatuses[gt] = await getGateStatus(examId, gt, active.tenant_id);
+      }
+
+      // Check whether grading gate is already submitted (has any responses)
+      function isGateSubmitted(gateType) {
+        const rt = responseMap[gateType] || {};
+        return Object.keys(rt).length > 0;
+      }
+
+      // Can teacher submit GRADING gate? All submitted attempts must be FULLY_GRADED
+      // (We'll check this lazily below when building the pane)
 
       const bandRows = bands.map((b) => `
         <div class="band-row" style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
@@ -546,6 +690,7 @@ export async function handleExamRequest(ctx) {
             <button class="tab ${activePane === "publish" ? "active" : ""}" onclick="showPane('publish',this)">Publish</button>
             <button class="tab ${activePane === "access" ? "active" : ""}" onclick="showPane('access',this)">Access</button>
             <button class="tab" onclick="showPane('results',this)">Results</button>
+            ${hasAnyGate ? `<button class="tab ${activePane === "approvals" ? "active" : ""}" onclick="showPane('approvals',this)">&#10004; Approvals</button>` : ""}
           </div>
         </div>
 
@@ -851,12 +996,21 @@ export async function handleExamRequest(ctx) {
                 ⚠️ Add at least one question before publishing.
               </div>
               <button class="btn2" type="button" disabled style="margin-top:14px">🔒 Publish Exam</button>
-            ` : exam.status === "DRAFT" ? `
-              <form method="post" action="/exam-publish" style="margin-top:14px">
-                <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
-                <button class="btn2" type="submit">Publish Exam</button>
-              </form>
-            ` : `
+            ` : exam.status === "DRAFT" ? (() => {
+              const qGate = gateStatuses["QUESTIONS"];
+              const qBlocked = active.role === "SCHOOL_ADMIN" && qGate !== "NOT_CONFIGURED" && qGate !== "APPROVED";
+              return qBlocked ? `
+                <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:10px 14px;margin-top:14px;color:#856404;font-size:13px">
+                  ⚠️ Questions approval required before publishing.
+                </div>
+                <button class="btn2" type="button" disabled style="margin-top:14px;opacity:0.45;cursor:not-allowed">🔒 Publish Exam</button>
+              ` : `
+                <form method="post" action="/exam-publish" style="margin-top:14px">
+                  <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
+                  <button class="btn2" type="submit">Publish Exam</button>
+                </form>
+              `;
+            })() : `
               <div style="background:#d4f5e9;border:1px solid #0b7a75;border-radius:8px;padding:10px 14px;margin-top:14px;color:#0b7a75;font-size:13px">
                 ✅ This exam has been published${exam.published_at ? " on " + escapeHtml(fmtISO(exam.published_at)) : ""}.
               </div>
@@ -936,13 +1090,35 @@ export async function handleExamRequest(ctx) {
                 ✅ Results already released on <strong>${escapeHtml(fmtISO(exam.results_published_at))}</strong>.
               </div>
               <button class="btn2" type="button" disabled style="margin-top:14px">🔒 Release Results Now</button>
-            ` : `
-              <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">Results have not been released to students yet.</p>
-              <form method="post" action="/exam-release-results">
-                <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
-                <button class="btn2" type="submit" onclick="return confirm('Release results to all students now?')">Release Results Now</button>
-              </form>
-            `}
+            ` : (() => {
+              if (active.role === "SCHOOL_ADMIN") {
+                const gradingSt = gateStatuses["GRADING"];
+                const resultsSt = gateStatuses["RESULTS"];
+                if (gradingSt !== "NOT_CONFIGURED" && gradingSt !== "APPROVED") {
+                  return `
+                    <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:10px 14px;color:#856404;font-size:13px">
+                      ⚠️ Grading approval required before releasing results.
+                    </div>
+                    <button class="btn2" type="button" disabled style="margin-top:14px;opacity:0.45;cursor:not-allowed">🔒 Release Results Now</button>
+                  `;
+                }
+                if (resultsSt !== "NOT_CONFIGURED" && resultsSt !== "APPROVED") {
+                  return `
+                    <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:10px 14px;color:#856404;font-size:13px">
+                      ⚠️ Results approval required before releasing.
+                    </div>
+                    <button class="btn2" type="button" disabled style="margin-top:14px;opacity:0.45;cursor:not-allowed">🔒 Release Results Now</button>
+                  `;
+                }
+              }
+              return `
+                <p style="font-size:14px;color:rgba(0,0,0,.55);margin:0 0 12px">Results have not been released to students yet.</p>
+                <form method="post" action="/exam-release-results">
+                  <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
+                  <button class="btn2" type="submit" onclick="return confirm('Release results to all students now?')">Release Results Now</button>
+                </form>
+              `;
+            })()}
           </div>
 
         </div>
@@ -1112,6 +1288,90 @@ export async function handleExamRequest(ctx) {
           `}
 
         </div>
+
+        ${hasAnyGate ? (() => {
+          // Build the approvals pane
+          const gateBlocks = configuredGateTypes.map(gateType => {
+            const gateLabel = GATE_LABEL_MAP[gateType] || gateType;
+            const gateSt = gateStatuses[gateType];
+            const assigneesForGate = allGates.filter(g => g.gate_type === gateType);
+            const respForGate = responseMap[gateType] || {};
+            const submitted = isGateSubmitted(gateType);
+
+            // Status badge
+            const statusBadgeHtml = gateSt === "APPROVED"
+              ? `<span style="background:#d4f5e9;color:#0b7a75;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:700">✅ Approved</span>`
+              : gateSt === "REJECTED"
+              ? `<span style="background:#ffe8e8;color:#c00;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:700">❌ Rejected</span>`
+              : submitted
+              ? `<span style="background:#f0f0f0;color:#555;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:700">⏳ Awaiting Response</span>`
+              : `<span style="background:#fff3cd;color:#856404;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:700">Not Submitted</span>`;
+
+            // Per-approver status rows
+            const approverRows = assigneesForGate.map(a => {
+              const resp = respForGate[a.user_id];
+              const st = resp ? resp.status : "PENDING";
+              const badge = st === "APPROVED"
+                ? `<span style="color:#0b7a75;font-weight:700;font-size:12px">✅ Approved</span>`
+                : st === "REJECTED"
+                ? `<span style="color:#c00;font-weight:700;font-size:12px">❌ Rejected</span>`
+                : submitted
+                ? `<span style="color:rgba(0,0,0,.45);font-size:12px">⏳ Pending</span>`
+                : `<span style="color:rgba(0,0,0,.35);font-size:12px">Not sent</span>`;
+              return `
+                <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(0,0,0,.05)">
+                  <span style="font-size:13px">${escapeHtml(a.approver_name)}</span>
+                  ${badge}
+                </div>`;
+            }).join("");
+
+            // Rejection notes (from any rejecting approver)
+            const rejectionNotes = assigneesForGate
+              .filter(a => (respForGate[a.user_id] || {}).status === "REJECTED" && (respForGate[a.user_id] || {}).note)
+              .map(a => `
+                <div style="background:#ffe8e8;border:1px solid #f5c6c6;border-radius:8px;padding:8px 12px;margin-top:8px;font-size:13px">
+                  <strong>${escapeHtml(a.approver_name)}:</strong> ${escapeHtml(respForGate[a.user_id].note)}
+                </div>`).join("");
+
+            // Submit button — teacher only
+            let submitHtml = "";
+            if (active.role === "TEACHER") {
+              if (gateSt === "APPROVED") {
+                submitHtml = `<div style="margin-top:10px;font-size:13px;color:#0b7a75">✅ This gate is fully approved. No further action needed.</div>`;
+              } else if (submitted && gateSt !== "REJECTED") {
+                submitHtml = `<div style="margin-top:10px;font-size:13px;color:rgba(0,0,0,.5)">⏳ Submitted — waiting for all approvers to respond.</div>`;
+              } else {
+                const canSubmit = true; // QUESTIONS: anytime; GRADING/RESULTS: validated server-side
+                const submitLabel = gateSt === "REJECTED" ? "Resubmit for Approval" : "Submit for Approval";
+                submitHtml = `
+                  <form method="post" action="/exam-gate-submit" style="margin-top:10px">
+                    <input type="hidden" name="exam_id" value="${escapeAttr(examId)}" />
+                    <input type="hidden" name="gate_type" value="${escapeAttr(gateType)}" />
+                    <button type="submit" class="btn2" style="font-size:13px">${submitLabel}</button>
+                  </form>`;
+              }
+            }
+
+            return `
+              <div class="card" style="margin-bottom:12px">
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+                  <span style="font-weight:700;font-size:15px">${gateLabel} Gate</span>
+                  ${statusBadgeHtml}
+                </div>
+                <div style="margin-bottom:6px">
+                  ${approverRows}
+                </div>
+                ${rejectionNotes}
+                ${submitHtml}
+              </div>`;
+          }).join("");
+
+          return `
+            <!-- ===== APPROVALS PANE ===== -->
+            <div id="pane-approvals" class="pane ${activePane === "approvals" ? "active" : ""}">
+              ${gateBlocks}
+            </div>`;
+        })() : ""}
 
         <script>
           function showPane(name, btn) {

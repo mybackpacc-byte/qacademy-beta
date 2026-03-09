@@ -38,7 +38,9 @@ export async function onRequest(ctx) {
     path === "/sitting-create" ||
     path === "/sitting-save-settings" ||
     path === "/sitting-add-paper" ||
-    path === "/sitting-remove-paper"
+    path === "/sitting-remove-paper" ||
+    path === "/sitting-gate-save" ||
+    path === "/sitting-gate-remove-approver"
   ) {
     return handleSittingRequest(ctx);
   }
@@ -70,7 +72,8 @@ export async function onRequest(ctx) {
     path === "/exam-access-add-student" ||
     path === "/exam-access-remove" ||
     path === "/exam-grade" ||
-    path === "/exam-results-csv"
+    path === "/exam-results-csv" ||
+    path === "/exam-gate-submit"
   ) {
     return handleExamRequest(ctx);
   }

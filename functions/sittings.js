@@ -1,7 +1,8 @@
 // functions/sittings.js
 // Exam Sittings — School Admin tool
 // Routes: /sittings, /sitting-builder, /sitting-create,
-//         /sitting-save-settings, /sitting-add-paper, /sitting-remove-paper
+//         /sitting-save-settings, /sitting-add-paper, /sitting-remove-paper,
+//         /sitting-gate-save, /sitting-gate-remove-approver
 
 import { createHelpers } from "./shared.js";
 
@@ -241,6 +242,108 @@ export async function handleSittingRequest(ctx) {
       }
 
       return redirect(`/sitting-builder?sitting_id=${sittingId}&tab=papers`);
+    }
+
+    // ----------------------------------------------------------------
+    // POST /sitting-gate-save — add approver to a gate (or turn gate off)
+    // ----------------------------------------------------------------
+    if (path === "/sitting-gate-save" && request.method === "POST") {
+      const { ok, res, r, active } = await requireAdmin();
+      if (!ok) return res;
+
+      const f = await form();
+      const sittingId = (f.sitting_id || "").trim();
+      const examId    = (f.exam_id    || "").trim();
+      const gateType  = (f.gate_type  || "").trim();
+      const userId    = (f.user_id    || "").trim();
+      const enabled   = f.enabled === "1";
+
+      if (!sittingId || !examId || !["QUESTIONS","GRADING","RESULTS"].includes(gateType)) {
+        return redirect("/sittings");
+      }
+
+      // Verify sitting + exam belong to this tenant
+      const sitting = await first(
+        `SELECT id FROM exam_sittings WHERE id=? AND tenant_id=?`, [sittingId, active.tenant_id]
+      );
+      if (!sitting) return redirect("/sittings");
+
+      const paper = await first(
+        `SELECT id FROM exam_sitting_papers WHERE sitting_id=? AND exam_id=?`, [sittingId, examId]
+      );
+      if (!paper) return redirect(`/sitting-builder?sitting_id=${sittingId}&tab=approvals`);
+
+      const ts = nowISO();
+
+      if (!enabled) {
+        // Gate turned off — delete all gates and pending responses for this exam+gate_type
+        await run(
+          `DELETE FROM sitting_approval_gates WHERE exam_id=? AND gate_type=? AND tenant_id=?`,
+          [examId, gateType, active.tenant_id]
+        );
+        await run(
+          `DELETE FROM sitting_approval_responses WHERE exam_id=? AND gate_type=? AND status='PENDING' AND tenant_id=?`,
+          [examId, gateType, active.tenant_id]
+        );
+      } else if (userId) {
+        // Add approver — validate they are an active member of this tenant
+        const member = await first(
+          `SELECT id FROM memberships WHERE user_id=? AND tenant_id=? AND status='ACTIVE'`,
+          [userId, active.tenant_id]
+        );
+        if (member) {
+          // Only insert if not already assigned
+          const already = await first(
+            `SELECT id FROM sitting_approval_gates WHERE exam_id=? AND gate_type=? AND user_id=? AND tenant_id=?`,
+            [examId, gateType, userId, active.tenant_id]
+          );
+          if (!already) {
+            await run(
+              `INSERT INTO sitting_approval_gates (id, sitting_id, exam_id, gate_type, user_id, tenant_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)`,
+              [uuid(), sittingId, examId, gateType, userId, active.tenant_id, ts]
+            );
+          }
+        }
+      }
+
+      return redirect(`/sitting-builder?sitting_id=${sittingId}&tab=approvals`);
+    }
+
+    // ----------------------------------------------------------------
+    // POST /sitting-gate-remove-approver — remove one approver from a gate
+    // ----------------------------------------------------------------
+    if (path === "/sitting-gate-remove-approver" && request.method === "POST") {
+      const { ok, res, r, active } = await requireAdmin();
+      if (!ok) return res;
+
+      const f = await form();
+      const sittingId = (f.sitting_id || "").trim();
+      const examId    = (f.exam_id    || "").trim();
+      const gateType  = (f.gate_type  || "").trim();
+      const userId    = (f.user_id    || "").trim();
+
+      if (!sittingId || !examId || !gateType || !userId) {
+        return redirect("/sittings");
+      }
+
+      const sitting = await first(
+        `SELECT id FROM exam_sittings WHERE id=? AND tenant_id=?`, [sittingId, active.tenant_id]
+      );
+      if (!sitting) return redirect("/sittings");
+
+      // Remove from gates
+      await run(
+        `DELETE FROM sitting_approval_gates WHERE exam_id=? AND gate_type=? AND user_id=? AND tenant_id=?`,
+        [examId, gateType, userId, active.tenant_id]
+      );
+      // Delete their pending response if one exists
+      await run(
+        `DELETE FROM sitting_approval_responses WHERE exam_id=? AND gate_type=? AND approver_id=? AND status='PENDING' AND tenant_id=?`,
+        [examId, gateType, userId, active.tenant_id]
+      );
+
+      return redirect(`/sitting-builder?sitting_id=${sittingId}&tab=approvals`);
     }
 
     // ----------------------------------------------------------------
@@ -551,6 +654,131 @@ export async function handleSittingRequest(ctx) {
           </div>
         </div>`;
 
+      // ===== APPROVALS PANE DATA =====
+      // Load all active school members for the approver dropdown
+      const allMembers = await all(
+        `SELECT u.id, u.name, m.role
+         FROM memberships m JOIN users u ON u.id = m.user_id
+         WHERE m.tenant_id=? AND m.status='ACTIVE' AND u.status='ACTIVE'
+         ORDER BY u.name ASC`,
+        [active.tenant_id]
+      );
+
+      const GATE_TYPES = ["QUESTIONS", "GRADING", "RESULTS"];
+      const GATE_LABELS = { QUESTIONS: "📝 Questions", GRADING: "✏️ Grading", RESULTS: "📊 Results" };
+
+      // Build the approvals pane — one section per paper
+      const approvalSections = [];
+      for (const paper of papers) {
+        // Get existing gates for this exam
+        const gates = await all(
+          `SELECT sag.id AS gate_id, sag.gate_type, sag.user_id, u.name AS approver_name
+           FROM sitting_approval_gates sag
+           JOIN users u ON u.id = sag.user_id
+           WHERE sag.exam_id=? AND sag.tenant_id=?
+           ORDER BY sag.gate_type, u.name ASC`,
+          [paper.exam_id, active.tenant_id]
+        );
+
+        // Group gates by type
+        const gatesByType = {};
+        for (const g of gates) {
+          if (!gatesByType[g.gate_type]) gatesByType[g.gate_type] = [];
+          gatesByType[g.gate_type].push(g);
+        }
+
+        const gateBlocks = GATE_TYPES.map(gateType => {
+          const assignees = gatesByType[gateType] || [];
+          const isEnabled = assignees.length > 0;
+
+          // Assigned approvers list
+          const approverRows = assignees.map(a => `
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(0,0,0,.05)">
+              <span style="font-size:13px">${escapeHtml(a.approver_name)}</span>
+              <form method="post" action="/sitting-gate-remove-approver" style="margin:0">
+                <input type="hidden" name="sitting_id" value="${escapeAttr(sittingId)}" />
+                <input type="hidden" name="exam_id"    value="${escapeAttr(paper.exam_id)}" />
+                <input type="hidden" name="gate_type"  value="${escapeAttr(gateType)}" />
+                <input type="hidden" name="user_id"    value="${escapeAttr(a.user_id)}" />
+                <button type="submit" class="btn3" style="padding:2px 8px;font-size:11px">Remove</button>
+              </form>
+            </div>`).join("");
+
+          // Dropdown: members not already assigned to this gate
+          const assignedIds = new Set(assignees.map(a => a.user_id));
+          const availableMembers = allMembers.filter(m => !assignedIds.has(m.id));
+          const memberOptions = availableMembers.map(m =>
+            `<option value="${escapeAttr(m.id)}">${escapeHtml(m.name)}</option>`
+          ).join("");
+
+          return `
+            <div style="border:1px solid rgba(0,0,0,.09);border-radius:10px;padding:12px 14px;margin-bottom:10px">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                <span style="font-weight:700;font-size:14px">${GATE_LABELS[gateType]}</span>
+                ${isEnabled
+                  ? `<form method="post" action="/sitting-gate-save" style="margin:0">
+                       <input type="hidden" name="sitting_id" value="${escapeAttr(sittingId)}" />
+                       <input type="hidden" name="exam_id"    value="${escapeAttr(paper.exam_id)}" />
+                       <input type="hidden" name="gate_type"  value="${escapeAttr(gateType)}" />
+                       <input type="hidden" name="enabled"    value="0" />
+                       <button type="submit" class="btn3" style="font-size:11px;padding:3px 9px;background:#ffe8e8;color:#c00;border-color:#f5c6c6"
+                               onclick="return confirm('Turn off this gate? All assigned approvers and pending responses will be removed.')">Turn Off</button>
+                     </form>`
+                  : `<span style="font-size:12px;color:rgba(0,0,0,.4)">Off</span>`
+                }
+              </div>
+
+              ${isEnabled ? `
+                <div style="margin-bottom:8px">
+                  ${approverRows || `<p class="muted small" style="margin:4px 0">No approvers assigned.</p>`}
+                </div>
+                ${availableMembers.length > 0 ? `
+                  <form method="post" action="/sitting-gate-save" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:6px">
+                    <input type="hidden" name="sitting_id" value="${escapeAttr(sittingId)}" />
+                    <input type="hidden" name="exam_id"    value="${escapeAttr(paper.exam_id)}" />
+                    <input type="hidden" name="gate_type"  value="${escapeAttr(gateType)}" />
+                    <input type="hidden" name="enabled"    value="1" />
+                    <select name="user_id" required style="flex:1;min-width:160px;font-size:13px">
+                      <option value="">— add approver —</option>
+                      ${memberOptions}
+                    </select>
+                    <button type="submit" class="btn3" style="font-size:12px;padding:5px 10px">+ Add</button>
+                  </form>
+                ` : `<p class="muted small" style="margin:4px 0">All school members are already assigned.</p>`}
+              ` : `
+                <form method="post" action="/sitting-gate-save" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                  <input type="hidden" name="sitting_id" value="${escapeAttr(sittingId)}" />
+                  <input type="hidden" name="exam_id"    value="${escapeAttr(paper.exam_id)}" />
+                  <input type="hidden" name="gate_type"  value="${escapeAttr(gateType)}" />
+                  <input type="hidden" name="enabled"    value="1" />
+                  <select name="user_id" required style="flex:1;min-width:160px;font-size:13px">
+                    <option value="">— add first approver to enable —</option>
+                    ${allMembers.map(m => `<option value="${escapeAttr(m.id)}">${escapeHtml(m.name)}</option>`).join("")}
+                  </select>
+                  <button type="submit" class="btn3" style="font-size:12px;padding:5px 10px">Enable &amp; Add</button>
+                </form>
+              `}
+            </div>`;
+        }).join("");
+
+        approvalSections.push(`
+          <div class="card">
+            <div style="margin-bottom:12px">
+              <div style="font-size:11px;color:rgba(0,0,0,.4);text-transform:uppercase;letter-spacing:.04em">${escapeHtml(paper.course_title)}</div>
+              <div style="font-weight:700;font-size:15px">${escapeHtml(paper.exam_title)}</div>
+            </div>
+            ${gateBlocks}
+          </div>`);
+      }
+
+      const approvalsPane = `
+        <div id="pane-approvals" class="pane ${activeTab === "approvals" ? "active" : ""}">
+          ${papers.length === 0
+            ? `<div class="card"><p class="muted">No papers in this sitting yet. Add papers in the Papers tab first.</p></div>`
+            : approvalSections.join("")
+          }
+        </div>`;
+
       return page(`
         <style>
           .pane{display:none}.pane.active{display:block}
@@ -579,13 +807,15 @@ export async function handleSittingRequest(ctx) {
           </div>
         </div>
         <div class="sit-tabs">
-          <button class="sit-tab ${activeTab === "settings" ? "active" : ""}" onclick="showTab('settings',this)">&#9881;&#65039; Settings</button>
-          <button class="sit-tab ${activeTab === "papers"   ? "active" : ""}" onclick="showTab('papers',this)">&#128196; Papers (${papers.length})</button>
-          <button class="sit-tab ${activeTab === "results"  ? "active" : ""}" onclick="showTab('results',this)">&#128202; Results</button>
+          <button class="sit-tab ${activeTab === "settings"  ? "active" : ""}" onclick="showTab('settings',this)">&#9881;&#65039; Settings</button>
+          <button class="sit-tab ${activeTab === "papers"    ? "active" : ""}" onclick="showTab('papers',this)">&#128196; Papers (${papers.length})</button>
+          <button class="sit-tab ${activeTab === "approvals" ? "active" : ""}" onclick="showTab('approvals',this)">&#10004; Approvals</button>
+          <button class="sit-tab ${activeTab === "results"   ? "active" : ""}" onclick="showTab('results',this)">&#128202; Results</button>
         </div>
         <div class="sit-tab-body">
           ${settingsPane}
           ${papersPane}
+          ${approvalsPane}
           ${resultsPane}
         </div>
         <script>

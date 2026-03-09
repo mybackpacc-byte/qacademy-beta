@@ -398,6 +398,32 @@ CREATE TABLE IF NOT EXISTS exam_sitting_papers (
 );
 
 
+-- 25. sitting_approval_gates — which users must approve which gate for each exam paper
+CREATE TABLE IF NOT EXISTS sitting_approval_gates (
+  id          TEXT PRIMARY KEY,
+  sitting_id  TEXT,              -- null if standalone exam (future)
+  exam_id     TEXT NOT NULL,
+  gate_type   TEXT NOT NULL,     -- QUESTIONS | GRADING | RESULTS
+  user_id     TEXT NOT NULL,     -- assigned approver
+  tenant_id   TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+
+-- 26. sitting_approval_responses — approver decisions per gate
+CREATE TABLE IF NOT EXISTS sitting_approval_responses (
+  id           TEXT PRIMARY KEY,
+  exam_id      TEXT NOT NULL,
+  gate_type    TEXT NOT NULL,    -- QUESTIONS | GRADING | RESULTS
+  approver_id  TEXT NOT NULL,
+  status       TEXT NOT NULL DEFAULT 'PENDING', -- PENDING | APPROVED | REJECTED
+  note         TEXT,             -- rejection reason or comment
+  responded_at TEXT,
+  tenant_id    TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+
+
 -- ============================================================
 -- INDEXES
 -- Critical for performance at scale — without these, queries
