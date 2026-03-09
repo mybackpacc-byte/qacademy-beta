@@ -2,7 +2,11 @@
 // Entry point — routes requests to the correct handler file
 // Do not put any logic here
 
-import { handleAppRequest } from "./app.js";
+import { handleAuthRequest } from "./auth.js";
+import { handleSysRequest } from "./sys.js";
+import { handleAdminRequest } from "./admin.js";
+import { handleTeacherRequest } from "./teacher.js";
+import { handleStudentRequest } from "./student.js";
 import { handleExamRequest } from "./exams.js";
 import { handleQuestionBankRequest } from "./question-bank.js";
 import { handleAttemptRequest } from "./attempts.js";
@@ -83,18 +87,33 @@ export async function onRequest(ctx) {
     return handleExamRequest(ctx);
   }
 
-  // School class management routes
+  // System Admin routes
   if (
-    path === "/school-create-class" ||
-    path === "/school-class" ||
-    path === "/school-class-add-student" ||
-    path === "/school-class-remove-student" ||
-    path === "/school-class-enrol-course" ||
-    path === "/school-class-archive"
+    path === "/sys" ||
+    path.startsWith("/sys-")
   ) {
-    return handleAppRequest(ctx);
+    return handleSysRequest(ctx);
   }
 
-  // Everything else goes to app.js
-  return handleAppRequest(ctx);
+  // School Admin routes
+  if (
+    path === "/school" ||
+    path.startsWith("/school-")
+  ) {
+    return handleAdminRequest(ctx);
+  }
+
+  // Teacher dashboard
+  if (path === "/teacher") {
+    return handleTeacherRequest(ctx);
+  }
+
+  // Student dashboard
+  if (path === "/student") {
+    return handleStudentRequest(ctx);
+  }
+
+  // Auth routes: /, /login, /logout, /setup, /profile, /no-access,
+  // /choose-school, /switch-school, /join, /join-login, /join-create-account, /health
+  return handleAuthRequest(ctx);
 }
