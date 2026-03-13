@@ -1526,24 +1526,104 @@ export async function handleExamRequest(ctx) {
       const r = await requireLogin();
       if (!r.ok) return r.res;
       const active = pickActiveMembership(r);
-      if (!active || (active.role !== "TEACHER" && active.role !== "SCHOOL_ADMIN")) return redirect("/");
+      if (!active) return redirect("/");
 
       const attemptId = url.searchParams.get("attempt_id") || "";
-      const examId    = url.searchParams.get("exam_id")    || "";
       const viewOnly  = url.searchParams.get("view") === "1";
-      if (!attemptId || !examId) return redirect("/teacher");
+      const userId    = r.user.id;
+      const tenantId  = active.tenant_id;
 
-      const exam = await verifyExamAccess(examId, active.tenant_id, r.user.id, active.role);
+      // If attempt_id provided but no exam_id, derive it
+      let resolvedExamId = url.searchParams.get("exam_id") || "";
+      if (attemptId && !resolvedExamId) {
+        const att = await first(`SELECT exam_id FROM exam_attempts WHERE id=? AND tenant_id=?`, [attemptId, tenantId]);
+        if (att) resolvedExamId = att.exam_id;
+      }
+      if (!attemptId || !resolvedExamId) return redirect("/teacher");
+
+      // Access check: teacher/admin via verifyExamAccess, or GRADING gate approver
+      let exam = null;
+      let isGradingApprover = false;
+      if (active.role === "TEACHER" || active.role === "SCHOOL_ADMIN") {
+        exam = await verifyExamAccess(resolvedExamId, tenantId, userId, active.role);
+      }
+      if (!exam) {
+        // Check if user is a GRADING gate approver for this exam
+        const gateCheck = await first(
+          `SELECT sag.id
+           FROM sitting_approval_gates sag
+           WHERE sag.exam_id=? AND sag.gate_type='GRADING' AND sag.user_id=? AND sag.tenant_id=?`,
+          [resolvedExamId, userId, tenantId]
+        );
+        if (gateCheck) {
+          exam = await first(`SELECT * FROM exams WHERE id=? AND tenant_id=?`, [resolvedExamId, tenantId]);
+        }
+      }
       if (!exam) return redirect("/teacher");
+
+      // Check if user is a GRADING gate approver with PENDING response
+      const pendingGradingGate = viewOnly ? await first(
+        `SELECT sag.id
+         FROM sitting_approval_gates sag
+         JOIN sitting_approval_responses sar
+           ON sar.exam_id=sag.exam_id AND sar.gate_type=sag.gate_type
+          AND sar.approver_id=sag.user_id AND sar.tenant_id=sag.tenant_id
+         WHERE sag.exam_id=? AND sag.gate_type='GRADING' AND sag.user_id=? AND sag.tenant_id=? AND sar.status='PENDING'
+         LIMIT 1`,
+        [resolvedExamId, userId, tenantId]
+      ) : null;
+      isGradingApprover = !!pendingGradingGate;
 
       const attempt = await first(
         `SELECT ea.*, u.name AS student_name
          FROM exam_attempts ea
          JOIN users u ON u.id = ea.user_id
          WHERE ea.id=? AND ea.exam_id=? AND ea.tenant_id=? AND ea.status='SUBMITTED'`,
-        [attemptId, examId, active.tenant_id]
+        [attemptId, resolvedExamId, tenantId]
       );
-      if (!attempt) return redirect(`/exam-builder?exam_id=${examId}&pane=results`);
+      if (!attempt) return redirect(`/exam-builder?exam_id=${resolvedExamId}&pane=results`);
+
+      // Load approver comments for this attempt on GRADING gate
+      let gradingComments = [];
+      if (viewOnly) {
+        gradingComments = await all(
+          `SELECT sac.question_id, sac.approver_id, sac.comment, u.name AS approver_name
+           FROM sitting_approval_comments sac
+           JOIN users u ON u.id = sac.approver_id
+           WHERE sac.exam_id=? AND sac.gate_type='GRADING' AND sac.attempt_id=? AND sac.tenant_id=?
+           ORDER BY sac.created_at ASC`,
+          [resolvedExamId, attemptId, tenantId]
+        );
+      }
+      const gradingCommentsByQ = {};
+      for (const c of gradingComments) {
+        if (!gradingCommentsByQ[c.question_id]) gradingCommentsByQ[c.question_id] = [];
+        gradingCommentsByQ[c.question_id].push(c);
+      }
+      // For approver mode, pre-fill own comments
+      let myGradingComments = {};
+      if (isGradingApprover) {
+        const rows = await all(
+          `SELECT question_id, comment FROM sitting_approval_comments
+           WHERE exam_id=? AND gate_type='GRADING' AND approver_id=? AND attempt_id=? AND tenant_id=?`,
+          [resolvedExamId, userId, attemptId, tenantId]
+        );
+        for (const c of rows) myGradingComments[c.question_id] = c.comment;
+      }
+
+      // Load overall gate decision note (for read-only display)
+      let gateDecisionNote = null;
+      if (viewOnly && !isGradingApprover) {
+        const gateResp = await first(
+          `SELECT sar.status, sar.note, u.name AS approver_name
+           FROM sitting_approval_responses sar
+           JOIN users u ON u.id = sar.approver_id
+           WHERE sar.exam_id=? AND sar.gate_type='GRADING' AND sar.tenant_id=? AND sar.status IN ('APPROVED','REJECTED')
+           ORDER BY sar.updated_at DESC LIMIT 1`,
+          [resolvedExamId, tenantId]
+        );
+        if (gateResp) gateDecisionNote = gateResp;
+      }
 
       const fmtSecs = (secs) => {
         if (secs === null || secs === undefined) return "—";
@@ -1558,7 +1638,7 @@ export async function handleExamRequest(ctx) {
       const questions = await all(
         `SELECT id, question_type, question_text, marks, sort_order, partial_marking, model_answer
          FROM exam_questions WHERE exam_id=? AND tenant_id=? ORDER BY sort_order ASC`,
-        [examId, active.tenant_id]
+        [resolvedExamId, tenantId]
       );
 
       // Load ALL options for all questions
@@ -1700,6 +1780,40 @@ export async function handleExamRequest(ctx) {
             ${gradedLine}`;
         }
 
+        // Approver comment block for this question
+        let approverCommentHtml = "";
+        if (isGradingApprover) {
+          // Show other approvers' comments + own textarea
+          const others = (gradingCommentsByQ[q.id] || []).filter(c => c.approver_id !== userId);
+          const othersHtml = others.map(c => `
+            <div style="background:#f0f7ff;border-radius:8px;padding:8px 12px;margin-bottom:6px">
+              <span style="font-weight:700;font-size:12px">${escapeHtml(c.approver_name)}</span>
+              <div style="margin-top:4px;color:rgba(0,0,0,.75)">${escapeHtml(c.comment)}</div>
+            </div>
+          `).join("");
+          approverCommentHtml = `
+            <div style="margin-top:14px;padding-top:12px;border-top:1px solid rgba(0,0,0,.07)">
+              ${othersHtml}
+              <label style="font-size:12px;color:rgba(0,0,0,.5);display:block;margin-top:${others.length ? "10px" : "0"}">Approver comment <span class="muted">(optional)</span></label>
+              <textarea name="comment_${escapeAttr(q.id)}" rows="2" style="width:100%;font-size:13px;box-sizing:border-box" placeholder="Leave a comment on this question…">${escapeHtml(myGradingComments[q.id] || "")}</textarea>
+            </div>`;
+        } else if (viewOnly) {
+          // Read-only: show existing approver comments if any
+          const comments = gradingCommentsByQ[q.id] || [];
+          if (comments.length > 0) {
+            approverCommentHtml = `
+              <div style="margin-top:14px;padding-top:12px;border-top:1px solid rgba(0,0,0,.07)">
+                ${comments.map(c => `
+                  <div style="background:#f0f7ff;border-radius:8px;padding:8px 12px;margin-bottom:6px">
+                    <span style="font-weight:700;font-size:12px">${escapeHtml(c.approver_name)}</span>
+                    <span class="muted small" style="margin-left:4px">(Grading Gate)</span>
+                    <div style="margin-top:4px;color:rgba(0,0,0,.75)">${escapeHtml(c.comment)}</div>
+                  </div>
+                `).join("")}
+              </div>`;
+          }
+        }
+
         return `
         <div class="card" id="q-${escapeAttr(q.id)}" style="margin:8px 0;scroll-margin-top:16px">
           <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
@@ -1711,23 +1825,60 @@ export async function handleExamRequest(ctx) {
           </div>
           <div style="font-size:15px;font-weight:600;margin-bottom:12px">${escapeHtml(q.question_text)}</div>
           ${body}
+          ${approverCommentHtml}
         </div>`;
       }).join("");
 
       // Wrap questions in form (or not for view-only)
-      const formWrap = viewOnly
-        ? questionCards
-        : `<form method="post" action="/exam-grade">
+      let formWrap;
+      if (isGradingApprover) {
+        // Approver mode — wrap in form to POST /grading-review-respond
+        formWrap = `<form method="post" action="/grading-review-respond">
             <input type="hidden" name="attempt_id" value="${escapeAttr(attemptId)}" />
-            <input type="hidden" name="exam_id"    value="${escapeAttr(examId)}" />
+            <input type="hidden" name="exam_id"    value="${escapeAttr(resolvedExamId)}" />
+            ${questionCards}
+            <div class="card" style="background:#fffbea;border:1px solid #f0c040">
+              <h2 style="margin:0 0 14px">Grading Review Decision</h2>
+              <label>Overall note <span class="muted">(optional)</span></label>
+              <textarea name="overall_note" rows="3" placeholder="Overall comments for this grading review…" style="margin-bottom:14px"></textarea>
+              <div style="display:flex;gap:10px">
+                <button name="decision" value="APPROVED" type="submit" class="btn2" style="flex:1;font-size:14px;padding:12px">&#10003; Approve</button>
+                <button name="decision" value="REJECTED" type="submit" style="flex:1;font-size:14px;padding:12px;border:0;border-radius:10px;background:#ffe8e8;color:#c00;font-weight:700;cursor:pointer">&#10007; Reject</button>
+              </div>
+            </div>
+          </form>`;
+      } else if (viewOnly) {
+        formWrap = questionCards;
+      } else {
+        formWrap = `<form method="post" action="/exam-grade">
+            <input type="hidden" name="attempt_id" value="${escapeAttr(attemptId)}" />
+            <input type="hidden" name="exam_id"    value="${escapeAttr(resolvedExamId)}" />
             ${questionCards}
             <div class="card" style="padding:12px 16px">
               <div class="actions">
                 <button class="btn2" type="submit">Save Grades</button>
-                <a href="/exam-builder?exam_id=${escapeAttr(examId)}&pane=results" class="btn3" style="text-decoration:none">Cancel</a>
+                <a href="/exam-builder?exam_id=${escapeAttr(resolvedExamId)}&pane=results" class="btn3" style="text-decoration:none">Cancel</a>
               </div>
             </div>
           </form>`;
+      }
+
+      // Approver banner
+      const approverBanner = isGradingApprover
+        ? `<div class="card" style="background:#fff8e1;border:1px solid #f0b840;padding:12px 16px;margin-bottom:8px">
+             <p style="margin:0;font-size:14px;font-weight:600">&#128065;&#65039; You are reviewing the grading for this attempt. You can leave per-question comments below. Submit your overall decision at the bottom.</p>
+           </div>`
+        : "";
+
+      // Gate decision note (read-only for teacher/admin)
+      const gateDecisionBanner = gateDecisionNote
+        ? `<div style="background:${gateDecisionNote.status === 'APPROVED' ? '#d4f5e9;border:1px solid #0b5e4e' : '#ffe8e8;border:1px solid #c00'};border-radius:10px;padding:10px 14px;margin-bottom:8px;font-size:13px">
+             <strong>Grading Gate ${gateDecisionNote.status === 'APPROVED' ? 'Approved' : 'Rejected'}</strong> by ${escapeHtml(gateDecisionNote.approver_name)}${gateDecisionNote.note ? ` — ${escapeHtml(gateDecisionNote.note)}` : ""}
+           </div>`
+        : "";
+
+      const backHref = isGradingApprover ? "/approvals" : `/exam-builder?exam_id=${escapeAttr(resolvedExamId)}&pane=results`;
+      const backLabel = isGradingApprover ? "&#8592; Approval Inbox" : "&#8592; Back to Results";
 
       return page(`
         <style>
@@ -1740,14 +1891,16 @@ export async function handleExamRequest(ctx) {
         </style>
 
         <div class="card" style="margin-bottom:8px">
-          <div style="font-size:12px;color:rgba(0,0,0,.45);margin-bottom:4px"><a href="/exam-builder?exam_id=${escapeAttr(examId)}&pane=results">← Back to Results</a></div>
+          <div style="font-size:12px;color:rgba(0,0,0,.45);margin-bottom:4px"><a href="${backHref}">${backLabel}</a></div>
           <div style="display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:8px">
-            <h1 style="margin:0">${viewOnly ? "View Submission" : "Grade Submission"}</h1>
+            <h1 style="margin:0">${isGradingApprover ? "Review Grading" : (viewOnly ? "View Submission" : "Grade Submission")}</h1>
             <span class="muted small">${escapeHtml(exam.title)}</span>
           </div>
         </div>
 
-        ${viewOnly ? `<div style="background:#e8f4fd;border:1px solid #90caf9;border-radius:10px;padding:10px 14px;margin-bottom:8px;font-size:13px;color:#1565c0;font-weight:600">This attempt is fully graded — view only</div>` : ""}
+        ${gateDecisionBanner}
+        ${approverBanner}
+        ${viewOnly && !isGradingApprover ? `<div style="background:#e8f4fd;border:1px solid #90caf9;border-radius:10px;padding:10px 14px;margin-bottom:8px;font-size:13px;color:#1565c0;font-weight:600">This attempt is fully graded — view only</div>` : ""}
 
         <div class="gl">
           <div>
@@ -1897,6 +2050,86 @@ export async function handleExamRequest(ctx) {
 
       await recalcAttempt(attemptId, active.tenant_id, env.DB);
       return redirect(`/exam-builder?exam_id=${examId}&pane=results`);
+    }
+
+    // =============================
+    // POST /grading-review-respond — approver decision + per-question comments for GRADING gate
+    // =============================
+    if (path === "/grading-review-respond" && request.method === "POST") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active) return redirect("/");
+
+      const f = await form();
+      const examId    = (f.exam_id    || "").trim();
+      const attemptId = (f.attempt_id || "").trim();
+      const decision  = (f.decision   || "").trim();
+      const overallNote = (f.overall_note || "").trim() || null;
+
+      if (!examId || !attemptId) return redirect("/approvals");
+      if (!["APPROVED","REJECTED"].includes(decision)) return redirect("/approvals");
+
+      const userId   = r.user.id;
+      const tenantId = active.tenant_id;
+
+      // Validate: assigned GRADING gate approver with PENDING response
+      const gate = await first(
+        `SELECT id FROM sitting_approval_gates
+         WHERE exam_id=? AND gate_type='GRADING' AND user_id=? AND tenant_id=?`,
+        [examId, userId, tenantId]
+      );
+      if (!gate) return redirect("/approvals");
+
+      const pendingResp = await first(
+        `SELECT id FROM sitting_approval_responses
+         WHERE exam_id=? AND gate_type='GRADING' AND approver_id=? AND status='PENDING' AND tenant_id=?`,
+        [examId, userId, tenantId]
+      );
+      if (!pendingResp) return redirect("/approvals");
+
+      const ts = nowISO();
+
+      // Save per-question comments (fields named comment_[questionId])
+      for (const [key, rawVal] of Object.entries(f)) {
+        if (!key.startsWith("comment_")) continue;
+        const questionId  = key.slice(8);
+        const commentText = (Array.isArray(rawVal) ? rawVal[0] : rawVal || "").trim();
+        if (!commentText) continue;
+
+        // Verify question belongs to this exam + tenant
+        const qRow = await first(
+          `SELECT id FROM exam_questions WHERE id=? AND exam_id=? AND tenant_id=?`,
+          [questionId, examId, tenantId]
+        );
+        if (!qRow) continue;
+
+        const existingCmt = await first(
+          `SELECT id FROM sitting_approval_comments
+           WHERE exam_id=? AND gate_type='GRADING' AND question_id=? AND approver_id=? AND attempt_id=? AND tenant_id=?`,
+          [examId, questionId, userId, attemptId, tenantId]
+        );
+        if (existingCmt) {
+          await run(
+            `UPDATE sitting_approval_comments SET comment=?, updated_at=? WHERE id=?`,
+            [commentText, ts, existingCmt.id]
+          );
+        } else {
+          await run(
+            `INSERT INTO sitting_approval_comments (id, exam_id, gate_type, question_id, approver_id, tenant_id, comment, attempt_id, created_at, updated_at)
+             VALUES (?, ?, 'GRADING', ?, ?, ?, ?, ?, ?, ?)`,
+            [uuid(), examId, questionId, userId, tenantId, commentText, attemptId, ts, ts]
+          );
+        }
+      }
+
+      // Update gate response
+      await run(
+        `UPDATE sitting_approval_responses SET status=?, note=?, updated_at=? WHERE id=?`,
+        [decision, overallNote, ts, pendingResp.id]
+      );
+
+      return redirect("/approvals");
     }
 
     // =============================

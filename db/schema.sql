@@ -432,6 +432,7 @@ CREATE TABLE IF NOT EXISTS sitting_approval_comments (
   approver_id  TEXT NOT NULL,
   tenant_id    TEXT NOT NULL,
   comment      TEXT NOT NULL,
+  attempt_id   TEXT,
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL
 );
@@ -462,3 +463,6 @@ CREATE INDEX IF NOT EXISTS idx_exam_answers_question_id ON exam_answers(question
 
 -- Phase 8b.2 — run on existing DB via wrangler d1 execute:
 -- CREATE TABLE IF NOT EXISTS sitting_approval_comments (id TEXT PRIMARY KEY, exam_id TEXT NOT NULL, gate_type TEXT NOT NULL, question_id TEXT NOT NULL, approver_id TEXT NOT NULL, tenant_id TEXT NOT NULL, comment TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+
+-- Grading Gate Approver Review — add attempt_id to sitting_approval_comments:
+-- ALTER TABLE sitting_approval_comments ADD COLUMN attempt_id TEXT;

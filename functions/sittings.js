@@ -1061,7 +1061,10 @@ export async function handleSittingRequest(ctx) {
         `SELECT sag.exam_id, sag.gate_type, sag.sitting_id,
                 e.title AS exam_title,
                 es.title AS sitting_title,
-                u.name AS submitter_name
+                u.name AS submitter_name,
+                (SELECT ea.id FROM exam_attempts ea
+                 WHERE ea.exam_id=sag.exam_id AND ea.tenant_id=sag.tenant_id AND ea.status='SUBMITTED'
+                 ORDER BY ea.submitted_at ASC LIMIT 1) AS first_submitted_attempt
          FROM sitting_approval_gates sag
          JOIN sitting_approval_responses sar
            ON sar.exam_id=sag.exam_id AND sar.gate_type=sag.gate_type
@@ -1107,7 +1110,7 @@ export async function handleSittingRequest(ctx) {
                   <span class="pill" style="background:#fff3e0;color:#a05000;font-size:12px">${gateIcon(item.gate_type)} ${escapeHtml(gateLabel(item.gate_type))}</span>
                   ${item.submitter_name ? `<span class="muted small">by ${escapeHtml(item.submitter_name)}</span>` : ""}
                 </div>
-                <a href="/exam-preview?exam_id=${escapeAttr(item.exam_id)}" style="font-size:13px">View exam &#8599;</a>
+                <a href="${item.gate_type === 'GRADING' ? `/exam-grade?attempt_id=${escapeAttr(item.first_submitted_attempt || '')}&view=1` : `/exam-preview?exam_id=${escapeAttr(item.exam_id)}`}" style="font-size:13px">View exam &#8599;</a>
               </div>
               <div style="min-width:240px;flex-shrink:0">
                 <form method="post" action="/approval-respond">

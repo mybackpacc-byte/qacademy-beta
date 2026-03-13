@@ -81,6 +81,7 @@ export async function onRequest(ctx) {
     path === "/exam-access-add-student" ||
     path === "/exam-access-remove" ||
     path === "/exam-grade" ||
+    path === "/grading-review-respond" ||
     path === "/exam-results-csv" ||
     path === "/exam-gate-submit"
   ) {
