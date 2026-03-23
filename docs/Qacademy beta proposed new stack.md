@@ -137,14 +137,48 @@ Server rendered tenant management and platform oversight. Clean, accurate, data-
 
 
 When to Migrate
-This migration should not happen until the following conditions are met:
+The admin restructure is now complete (March 2026). Migration to the new stack can begin.
 
-•	Current Beta admin restructure is complete and working
-•	Beta has real school users — at least 2 to 3 schools actively using it
-•	Revenue is flowing — either from Gamma or Beta
-•	The current version has been validated with real usage so we know exactly what needs to exist in v2
+Prerequisite met:
+•	Admin restructure — DONE. All admin pages restructured with tabs, filters, email check, merged approvals.
 
-Migrating before real users exist means rebuilding something that has not been validated. Real usage always reveals things that need to change. Build on the current version first, learn from real schools, then rebuild v2 properly in Next.js with confidence.
+Migration proceeds using the gradual approach described below.
+
+
+Migration Strategy — Gradual, Not Rewrite
+
+We are NOT doing a full rewrite. The app stays live throughout migration. One page migrates at a time.
+
+Phase 1 — Setup
+•	Set up Next.js project within the repo with Cloudflare Pages adapter
+•	Create shared components: Layout, TabNav, DataTable, FilterBar, FormCard
+•	Set up Tailwind CSS for consistent styling
+•	Configure D1 database binding in Next.js API routes
+
+Phase 2 — API Layer
+•	Add JSON API endpoints alongside existing HTML routes
+•	Current Workers logic (admin.js, sittings.js, exams.js) becomes the API
+•	Both old HTML pages and new React pages work simultaneously
+
+Phase 3 — Admin Pages (first migration)
+•	Migrate in order: Courses → Classes → People → Join Codes → Sittings overview
+•	Each page: build React version, test, switch over, remove old HTML
+•	Reusable components built here are used everywhere else later
+
+Phase 4 — Sittings and Exam Builder
+•	Sitting builder with interactive Papers/Results tabs
+•	Exam builder — biggest interactivity gain (drag to reorder, real-time validation)
+•	Approval gates and grading views
+
+Phase 5 — Student and Teacher Facing Pages
+•	Teacher dashboard and exam management
+•	Student dashboard and quiz runner
+•	Results and marksheet pages
+
+Phase 6 — Cleanup
+•	Remove old HTML rendering code from Workers
+•	Remove old [[path]].js router
+•	All routing handled by Next.js file-based system
 
 
 Summary

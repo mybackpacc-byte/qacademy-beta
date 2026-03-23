@@ -219,15 +219,16 @@ Shows requester name, email, which code they used, date requested.
 
 ## Implementation Order
 
-Do these in order — each builds on the previous:
+All steps completed — March 2026.
 
-| Step | Task | Reason |
+| Step | Task | Status |
 |---|---|---|
-| 1 | Course detail page with Details + Teachers + Students tabs | Foundation for everything else |
-| 2 | Class-to-Course enrolment (bulk action) | Most impactful single change |
-| 3 | Courses tab on class detail page | Completes the class ↔ course connection |
-| 4 | Join Codes UI redesign | Self-contained, no dependencies |
-| 5 | People page split + email check | Self-contained, improves onboarding |
+| 1 | Course detail page with Details + Teachers + Students + Classes tabs | Done |
+| 2 | Class-to-Course enrolment (bulk action) | Done (already existed) |
+| 3 | Class detail page restructured into Details + Students + Courses tabs | Done |
+| 4 | Join Codes UI redesign — plain English questions + course detail tab | Done |
+| 5 | People page split — Members tab with filters + Add Person tab with email check | Done |
+| 6 | Sitting builder — merged Approvals tab into Papers tab | Done |
 
 ---
 
@@ -237,14 +238,30 @@ Do these in order — each builds on the previous:
 |---|---|---|
 | `/school` Overview | No change | — |
 | `/school-sittings` | No change | — |
-| `/school-courses` | Restructure | List only + drill to detail page |
-| `/school-course` (new) | Build new | Course detail with 4 tabs |
-| `/school-classes` | Minor | No change to list page |
-| `/school-class` (existing) | Extend | Add Courses tab |
-| `/school-people` | Restructure | Two tabs + email check |
-| `/school-join-codes` | Restructure | Three sections + plain English form |
+| `/school-courses` | Done | Clean list linking to detail pages |
+| `/school-course` (new) | Done | Course detail with 5 tabs (Details, Teachers, Students, Classes, Join Codes) |
+| `/school-classes` | No change | List page unchanged |
+| `/school-class` | Done | Restructured into 3 tabs (Details, Students, Courses) |
+| `/school-people` | Done | 2 tabs (Members with filters, Add Person with email check) |
+| `/school-join-codes` | Done | 3 sections (Active Codes, Create Code, Pending Requests) + plain English form |
+| `/sitting-builder` | Done | Approvals merged into Papers tab, Approvals tab removed |
+
+## Additional changes made during restructure
+
+- `/school-update-course` — new route for editing course title/status
+- `/school-update-class` — new route for editing class details
+- `/school-course-enrol-class` — bulk enrol class from course page
+- `/school-course-unenrol-class` — bulk unenrol class from course page
+- `/school-class-unenrol-course` — bulk unlink course from class page
+- `/school-check-email` — email lookup for adding people
+- `/school-add-existing-user` — add existing user without password
+- `describeCode()` helper — human-readable join code descriptions
+- All POST handlers redirect back to the relevant tab
+- People page: batch context queries show courses/classes per member as pills
+- Join codes: course detail page has a Join Codes tab for course-specific codes
 
 ---
 
-*Save this file as `docs/beta-admin-restructure-plan.md` in the repo.*
-*Execute on Claude Desktop with MCP filesystem access.*
+## Next step
+
+Stack switch to React/Next.js. See `docs/Qacademy beta proposed new stack.md`.
