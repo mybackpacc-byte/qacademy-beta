@@ -802,69 +802,250 @@ export async function handleAdminRequest(ctx) {
       if (active.role !== "SCHOOL_ADMIN") return redirect("/");
 
       const tenantId = active.tenant_id;
-
-      const members = await all(
-        `SELECT u.id,u.name,u.email,m.id AS membership_id,m.role
-         FROM memberships m JOIN users u ON u.id=m.user_id
-         WHERE m.tenant_id=? AND m.status='ACTIVE' AND u.status='ACTIVE'
-         ORDER BY m.role ASC, u.name ASC`,
-        [tenantId]
-      );
-
-      const memberRows = members.map((m) => {
-        const self = m.id === r.user.id;
-        return `
-          <tr>
-            <td><b>${escapeHtml(m.name)}</b><br/><span class="muted small">${escapeHtml(m.email)}</span>${self ? `<div class="pill">You</div>` : ``}</td>
-            <td>
-              <form method="post" action="/school-update-member-role" class="actions">
-                <input type="hidden" name="user_id" value="${escapeAttr(m.id)}"/>
-                <select name="role" required>
-                  <option value="STUDENT" ${m.role === "STUDENT" ? "selected" : ""}>Student</option>
-                  <option value="TEACHER" ${m.role === "TEACHER" ? "selected" : ""}>Teacher</option>
-                  <option value="SCHOOL_ADMIN" ${m.role === "SCHOOL_ADMIN" ? "selected" : ""}>School Admin</option>
-                </select>
-                <button type="submit" class="btn2">Update</button>
-              </form>
-            </td>
-            <td>
-              <form method="post" action="/school-remove-member" onsubmit="return confirm('Remove this member from the school?')">
-                <input type="hidden" name="user_id" value="${escapeAttr(m.id)}"/>
-                <button type="submit" class="btn3" ${self ? "disabled title='Cannot remove yourself'" : ""}>Remove</button>
-              </form>
-            </td>
-          </tr>
-        `;
+      const tab = url.searchParams.get("tab") || "members";
+      const tabItems = ["members", "add"];
+      const tabLabels = { "members": "Members", "add": "Add Person" };
+      const tabNav = tabItems.map((t) => {
+        const active_ = t === tab;
+        const label = tabLabels[t] || t;
+        return `<a href="/school-people?tab=${t}" style="padding:6px 12px;border-radius:8px;text-decoration:none;white-space:nowrap${active_ ? ";background:rgba(0,0,0,.07);font-weight:700" : ""}">${label}</a>`;
       }).join("");
+
+      let tabContent = "";
+
+      // --- Members tab ---
+      if (tab === "members") {
+        const filterRole = url.searchParams.get("role") || "";
+        const filterCourseId = url.searchParams.get("course_id") || "";
+        const filterClassId = url.searchParams.get("class_id") || "";
+
+        // Build filtered member query
+        let sql = `SELECT DISTINCT u.id, u.name, u.email, m.role
+                   FROM memberships m JOIN users u ON u.id=m.user_id
+                   WHERE m.tenant_id=? AND m.status='ACTIVE' AND u.status='ACTIVE'`;
+        const params = [tenantId];
+
+        if (filterRole) {
+          sql += ` AND m.role=?`;
+          params.push(filterRole);
+        }
+        if (filterCourseId) {
+          sql += ` AND (EXISTS (SELECT 1 FROM enrollments e WHERE e.user_id=m.user_id AND e.course_id=?)
+                    OR EXISTS (SELECT 1 FROM course_teachers ct WHERE ct.user_id=m.user_id AND ct.course_id=?))`;
+          params.push(filterCourseId, filterCourseId);
+        }
+        if (filterClassId) {
+          sql += ` AND EXISTS (SELECT 1 FROM class_students cs WHERE cs.user_id=m.user_id AND cs.class_id=?)`;
+          params.push(filterClassId);
+        }
+        sql += ` ORDER BY m.role ASC, u.name ASC`;
+
+        const members = await all(sql, params);
+        const memberIds = members.map((m) => m.id);
+
+        // Batch context queries — courses and classes per member
+        const coursesByUser = {};
+        const classesByUser = {};
+
+        if (memberIds.length > 0) {
+          const placeholders = memberIds.map(() => "?").join(",");
+
+          const enrolledCourses = await all(
+            `SELECT e.user_id, c.title FROM enrollments e JOIN courses c ON c.id=e.course_id
+             WHERE e.user_id IN (${placeholders}) AND c.status='ACTIVE' ORDER BY c.title ASC`,
+            memberIds
+          );
+          const taughtCourses = await all(
+            `SELECT ct.user_id, c.title FROM course_teachers ct JOIN courses c ON c.id=ct.course_id
+             WHERE ct.user_id IN (${placeholders}) AND c.status='ACTIVE' ORDER BY c.title ASC`,
+            memberIds
+          );
+          const memberClasses = await all(
+            `SELECT cs.user_id, cl.name FROM class_students cs JOIN classes cl ON cl.id=cs.class_id
+             WHERE cs.user_id IN (${placeholders}) AND cl.status='ACTIVE' ORDER BY cl.name ASC`,
+            memberIds
+          );
+
+          for (const row of enrolledCourses) {
+            if (!coursesByUser[row.user_id]) coursesByUser[row.user_id] = [];
+            coursesByUser[row.user_id].push(row.title);
+          }
+          for (const row of taughtCourses) {
+            if (!coursesByUser[row.user_id]) coursesByUser[row.user_id] = [];
+            if (!coursesByUser[row.user_id].includes(row.title)) coursesByUser[row.user_id].push(row.title);
+          }
+          for (const row of memberClasses) {
+            if (!classesByUser[row.user_id]) classesByUser[row.user_id] = [];
+            classesByUser[row.user_id].push(row.name);
+          }
+        }
+
+        // Filter options
+        const allCourses = await all("SELECT id, title FROM courses WHERE tenant_id=? AND status='ACTIVE' ORDER BY title ASC", [tenantId]);
+        const allClasses = await all("SELECT id, name FROM classes WHERE tenant_id=? AND status='ACTIVE' ORDER BY name ASC", [tenantId]);
+
+        const roleFilterOptions = [
+          `<option value="">All roles</option>`,
+          `<option value="STUDENT"${filterRole === "STUDENT" ? " selected" : ""}>Student</option>`,
+          `<option value="TEACHER"${filterRole === "TEACHER" ? " selected" : ""}>Teacher</option>`,
+          `<option value="SCHOOL_ADMIN"${filterRole === "SCHOOL_ADMIN" ? " selected" : ""}>School Admin</option>`,
+        ].join("");
+
+        const courseFilterOptions = [`<option value="">All courses</option>`].concat(
+          allCourses.map((c) => `<option value="${escapeAttr(c.id)}"${filterCourseId === c.id ? " selected" : ""}>${escapeHtml(c.title)}</option>`)
+        ).join("");
+
+        const classFilterOptions = [`<option value="">All classes</option>`].concat(
+          allClasses.map((c) => `<option value="${escapeAttr(c.id)}"${filterClassId === c.id ? " selected" : ""}>${escapeHtml(c.name)}</option>`)
+        ).join("");
+
+        const memberRows = members.map((m) => {
+          const self = m.id === r.user.id;
+          const userCourses = coursesByUser[m.id] || [];
+          const userClasses = classesByUser[m.id] || [];
+          const contextPills = [
+            ...userCourses.map((t) => `<span class="pill" style="font-size:11px">${escapeHtml(t)}</span>`),
+            ...userClasses.map((n) => `<span class="pill" style="font-size:11px;background:rgba(0,0,0,.05)">${escapeHtml(n)}</span>`),
+          ].join(" ");
+
+          return `
+            <tr>
+              <td>
+                <b>${escapeHtml(m.name)}</b>${self ? ` <span class="pill">You</span>` : ``}<br/>
+                <span class="muted small">${escapeHtml(m.email)}</span>
+                ${contextPills ? `<div style="margin-top:4px">${contextPills}</div>` : ""}
+              </td>
+              <td>
+                <form method="post" action="/school-update-member-role" class="actions">
+                  <input type="hidden" name="user_id" value="${escapeAttr(m.id)}"/>
+                  <select name="role" required>
+                    <option value="STUDENT" ${m.role === "STUDENT" ? "selected" : ""}>Student</option>
+                    <option value="TEACHER" ${m.role === "TEACHER" ? "selected" : ""}>Teacher</option>
+                    <option value="SCHOOL_ADMIN" ${m.role === "SCHOOL_ADMIN" ? "selected" : ""}>School Admin</option>
+                  </select>
+                  <button type="submit" class="btn2">Update</button>
+                </form>
+              </td>
+              <td>
+                <form method="post" action="/school-remove-member" onsubmit="return confirm('Remove this member from the school?')">
+                  <input type="hidden" name="user_id" value="${escapeAttr(m.id)}"/>
+                  <button type="submit" class="btn3" ${self ? "disabled title='Cannot remove yourself'" : ""}>Remove</button>
+                </form>
+              </td>
+            </tr>
+          `;
+        }).join("");
+
+        tabContent = `
+          <div class="card">
+            <h2>Filter</h2>
+            <form method="get" action="/school-people">
+              <input type="hidden" name="tab" value="members"/>
+              <div class="row">
+                <div>
+                  <label>Role</label>
+                  <select name="role">${roleFilterOptions}</select>
+                </div>
+                <div>
+                  <label>Course</label>
+                  <select name="course_id">${courseFilterOptions}</select>
+                </div>
+                <div>
+                  <label>Class</label>
+                  <select name="class_id">${classFilterOptions}</select>
+                </div>
+              </div>
+              <button type="submit">Apply filters</button>
+            </form>
+          </div>
+          <div class="card">
+            <h2>Members (${members.length})</h2>
+            <table class="table">
+              <thead><tr><th>Member</th><th>Role</th><th></th></tr></thead>
+              <tbody>${memberRows || `<tr><td colspan="3" class="muted">No members match the filters</td></tr>`}</tbody>
+            </table>
+          </div>
+        `;
+      }
+
+      // --- Add Person tab ---
+      if (tab === "add") {
+        const checkEmail = url.searchParams.get("email") || "";
+        const exists = url.searchParams.get("exists") || "";
+        const userName = url.searchParams.get("user_name") || "";
+
+        let addContent = "";
+
+        if (!checkEmail) {
+          // Step 1: email check form
+          addContent = `
+            <div class="card">
+              <h2>Add Person</h2>
+              <p class="muted small">Enter their email to check if they already have an account.</p>
+              <form method="post" action="/school-check-email">
+                <label>Email</label>
+                <input name="email" type="email" required placeholder="user@example.com" />
+                <button type="submit">Check email</button>
+              </form>
+            </div>
+          `;
+        } else if (exists === "1") {
+          // Step 2a: existing user — just assign role
+          addContent = `
+            <div class="card">
+              <h2>Add Existing User</h2>
+              <p>Found: <b>${escapeHtml(userName)}</b> (${escapeHtml(checkEmail)})</p>
+              <p class="muted small">This person already has an account. Just choose their role at this school.</p>
+              <form method="post" action="/school-add-existing-user">
+                <input type="hidden" name="email" value="${escapeAttr(checkEmail)}"/>
+                <label>Role</label>
+                <select name="role" required>
+                  <option value="STUDENT">Student</option>
+                  <option value="TEACHER">Teacher</option>
+                  <option value="SCHOOL_ADMIN">School Admin</option>
+                </select>
+                <button type="submit">Add to school</button>
+              </form>
+              <p style="margin-top:10px"><a href="/school-people?tab=add">Check a different email</a></p>
+            </div>
+          `;
+        } else {
+          // Step 2b: new user — full form
+          addContent = `
+            <div class="card">
+              <h2>Create New User</h2>
+              <p class="muted small">No account found for <b>${escapeHtml(checkEmail)}</b>. Fill in the details to create one.</p>
+              <form method="post" action="/school-add-user">
+                <input type="hidden" name="email" value="${escapeAttr(checkEmail)}"/>
+                <label>Full name</label>
+                <input name="name" required />
+                <label>Role</label>
+                <select name="role" required>
+                  <option value="STUDENT">Student</option>
+                  <option value="TEACHER">Teacher</option>
+                  <option value="SCHOOL_ADMIN">School Admin</option>
+                </select>
+                <label>Temporary password</label>
+                <input name="password" type="text" required minlength="6" />
+                <button type="submit">Create user + add to school</button>
+              </form>
+              <p style="margin-top:10px"><a href="/school-people?tab=add">Check a different email</a></p>
+            </div>
+          `;
+        }
+
+        tabContent = addContent;
+      }
 
       return page(`
         ${schoolHeader(r, active)}
         ${schoolNav("/school-people")}
 
-        <div class="card">
-          <h2>Members (manage roles / remove)</h2>
-          <table class="table">
-            <thead><tr><th>Member</th><th>Role</th><th>Remove</th></tr></thead>
-            <tbody>${memberRows || `<tr><td colspan="3" class="muted">No users yet</td></tr>`}</tbody>
-          </table>
+        <div class="card" style="display:flex;flex-wrap:wrap;gap:4px;padding:10px 14px">
+          ${tabNav}
         </div>
 
-        <div class="card">
-          <h2>Add User (manual)</h2>
-          <form method="post" action="/school-add-user">
-            <label>Full name</label><input name="name" required />
-            <label>Email</label><input name="email" type="email" required />
-            <label>Role</label>
-            <select name="role" required>
-              <option value="TEACHER">Teacher</option>
-              <option value="STUDENT">Student</option>
-              <option value="SCHOOL_ADMIN">School Admin</option>
-            </select>
-            <label>Temporary password (used only if this email is NEW)</label>
-            <input name="password" type="text" required />
-            <button type="submit">Create user + add to this school</button>
-          </form>
-        </div>
+        ${tabContent}
       `);
     }
 
@@ -1298,6 +1479,55 @@ export async function handleAdminRequest(ctx) {
       return redirect(`/school-course?course_id=${courseId}&tab=students`);
     }
 
+    // =============================
+    // People: check email (POST)
+    // =============================
+    if (path === "/school-check-email" && request.method === "POST") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active || active.role !== "SCHOOL_ADMIN") return redirect("/");
+      const f = await form();
+      const email = (f.email || "").toLowerCase().trim();
+      if (!email) return redirect("/school-people?tab=add");
+      const u = await first("SELECT id, name FROM users WHERE email=? AND status='ACTIVE'", [email]);
+      if (u) {
+        return redirect(`/school-people?tab=add&email=${encodeURIComponent(email)}&exists=1&user_name=${encodeURIComponent(u.name)}`);
+      }
+      return redirect(`/school-people?tab=add&email=${encodeURIComponent(email)}&exists=0`);
+    }
+
+    // =============================
+    // People: add existing user (POST)
+    // =============================
+    if (path === "/school-add-existing-user" && request.method === "POST") {
+      const r = await requireLogin();
+      if (!r.ok) return r.res;
+      const active = pickActiveMembership(r);
+      if (!active || active.role !== "SCHOOL_ADMIN") return redirect("/");
+
+      const tenantId = active.tenant_id;
+      const f = await form();
+      const email = (f.email || "").toLowerCase().trim();
+      const role = (f.role || "");
+      if (!email || !["TEACHER", "STUDENT", "SCHOOL_ADMIN"].includes(role)) {
+        return redirect("/school-people?tab=add");
+      }
+
+      const u = await first("SELECT id FROM users WHERE email=? AND status='ACTIVE'", [email]);
+      if (!u) return redirect("/school-people?tab=add");
+
+      const ts = nowISO();
+      const m = await first("SELECT id,status FROM memberships WHERE user_id=? AND tenant_id=? ORDER BY created_at ASC LIMIT 1", [u.id, tenantId]);
+      if (!m) {
+        await run("INSERT INTO memberships (id,user_id,tenant_id,role,status,created_at,updated_at) VALUES (?,?,?,?,'ACTIVE',?,?)",
+          [uuid(), u.id, tenantId, role, ts, ts]);
+      } else {
+        await run("UPDATE memberships SET role=?, status='ACTIVE', updated_at=? WHERE id=?", [role, ts, m.id]);
+      }
+      return redirect("/school-people?tab=members");
+    }
+
     if (path === "/school-add-user" && request.method === "POST") {
       const r = await requireLogin();
       if (!r.ok) return r.res;
@@ -1336,7 +1566,7 @@ export async function handleAdminRequest(ctx) {
       } else {
         await run("UPDATE memberships SET role=?, status='ACTIVE', updated_at=? WHERE id=?", [role, ts, m.id]);
       }
-      return redirect("/school-people");
+      return redirect("/school-people?tab=members");
     }
 
     if (path === "/school-create-course" && request.method === "POST") {
