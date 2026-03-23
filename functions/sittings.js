@@ -468,15 +468,50 @@ export async function handleSittingRequest(ctx) {
         [active.tenant_id, active.tenant_id]
       );
 
-      const paperRows = papers.map((p, i) => `
+      // Load gate counts per paper (one query across all papers)
+      let gateCountMap = {};
+      if (papers.length > 0) {
+        const examIds = papers.map(p => p.exam_id);
+        const ph = examIds.map(() => "?").join(",");
+        const gateCounts = await all(
+          `SELECT exam_id, gate_type, COUNT(*) AS cnt
+           FROM sitting_approval_gates
+           WHERE tenant_id=? AND exam_id IN (${ph})
+           GROUP BY exam_id, gate_type`,
+          [active.tenant_id, ...examIds]
+        );
+        for (const row of gateCounts) {
+          if (!gateCountMap[row.exam_id]) gateCountMap[row.exam_id] = {};
+          gateCountMap[row.exam_id][row.gate_type] = Number(row.cnt);
+        }
+      }
+
+      const gateBadge = (letter, count) => count > 0
+        ? `<span style="display:inline-block;background:#d4f5e9;color:#0b5e4e;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:700">${letter}:${count}</span>`
+        : `<span style="font-size:12px;color:rgba(0,0,0,.35)">${letter}:0</span>`;
+
+      const paperRows = papers.map((p, i) => {
+        const cnts = gateCountMap[p.exam_id] || {};
+        const qCnt = cnts["QUESTIONS"] || 0;
+        const gCnt = cnts["GRADING"]   || 0;
+        const rCnt = cnts["RESULTS"]   || 0;
+        return `
         <tr>
           <td style="font-weight:700;color:rgba(0,0,0,.35);font-size:13px;width:28px">${i + 1}</td>
-          <td>
-            <b>${escapeHtml(p.exam_title)}</b><br/>
-            <span class="muted small">${escapeHtml(p.course_title)}${p.teacher_name ? ` &middot; ${escapeHtml(p.teacher_name)}` : ""}</span>
-          </td>
+          <td><b>${escapeHtml(p.exam_title)}</b></td>
+          <td class="small">${escapeHtml(p.course_title)}</td>
+          <td class="small">${p.teacher_name ? escapeHtml(p.teacher_name) : '<span class="muted">\u2014</span>'}</td>
           <td>${examBadge(p.exam_status)}</td>
-          <td>
+          <td style="white-space:nowrap">
+            <span style="display:inline-flex;gap:4px;align-items:center">
+              ${gateBadge("Q", qCnt)}
+              ${gateBadge("G", gCnt)}
+              ${gateBadge("R", rCnt)}
+            </span>
+          </td>
+          <td style="white-space:nowrap">
+            <a href="/sitting-gate-settings?sitting_id=${escapeAttr(sittingId)}&exam_id=${escapeAttr(p.exam_id)}"
+               class="btn3" style="display:inline-block;padding:4px 10px;font-size:12px;text-decoration:none;margin-right:4px">Set Approvals</a>
             <a href="/exam-builder?exam_id=${escapeAttr(p.exam_id)}" class="btn3"
                style="display:inline-block;padding:4px 10px;font-size:12px;text-decoration:none;margin-right:4px">Edit</a>
             <form method="post" action="/sitting-remove-paper" style="display:inline"
@@ -486,7 +521,8 @@ export async function handleSittingRequest(ctx) {
               <button type="submit" class="btn3" style="padding:4px 10px;font-size:12px">Remove</button>
             </form>
           </td>
-        </tr>`).join("");
+        </tr>`;
+      }).join("");
 
       const examOptions = availableExams.map(e =>
         `<option value="${escapeAttr(e.id)}">${escapeHtml(e.title)} &mdash; ${escapeHtml(e.course_title)} [${escapeHtml(e.status)}]</option>`
@@ -506,7 +542,7 @@ export async function handleSittingRequest(ctx) {
             <h2 style="margin:0 0 14px">Papers in this Sitting</h2>
             ${papers.length > 0 ? `
               <table class="table">
-                <thead><tr><th>#</th><th>Paper</th><th>Status</th><th>Actions</th></tr></thead>
+                <thead><tr><th>#</th><th>Paper</th><th>Course</th><th>Teacher</th><th>Status</th><th>Gates</th><th>Actions</th></tr></thead>
                 <tbody>${paperRows}</tbody>
               </table>
             ` : `<p class="muted">No papers added yet. Add a paper below.</p>`}
@@ -663,70 +699,7 @@ export async function handleSittingRequest(ctx) {
           </div>
         </div>`;
 
-      // ===== APPROVALS PANE DATA =====
-      // Load gate counts per paper (one query across all papers)
-      let gateCountMap = {};
-      if (papers.length > 0) {
-        const examIds = papers.map(p => p.exam_id);
-        const ph = examIds.map(() => "?").join(",");
-        const gateCounts = await all(
-          `SELECT exam_id, gate_type, COUNT(*) AS cnt
-           FROM sitting_approval_gates
-           WHERE tenant_id=? AND exam_id IN (${ph})
-           GROUP BY exam_id, gate_type`,
-          [active.tenant_id, ...examIds]
-        );
-        for (const row of gateCounts) {
-          if (!gateCountMap[row.exam_id]) gateCountMap[row.exam_id] = {};
-          gateCountMap[row.exam_id][row.gate_type] = Number(row.cnt);
-        }
-      }
-
-      const gateBadge = (letter, count) => count > 0
-        ? `<span style="display:inline-block;background:#d4f5e9;color:#0b5e4e;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:700">${letter}:${count}</span>`
-        : `<span style="font-size:12px;color:rgba(0,0,0,.35)">${letter}:0</span>`;
-
-      const approvalRows = papers.map((p, i) => {
-        const cnts = gateCountMap[p.exam_id] || {};
-        const qCnt = cnts["QUESTIONS"] || 0;
-        const gCnt = cnts["GRADING"]   || 0;
-        const rCnt = cnts["RESULTS"]   || 0;
-        return `
-          <tr>
-            <td style="font-weight:700;color:rgba(0,0,0,.35);font-size:13px;width:28px">${i + 1}</td>
-            <td>
-              <b>${escapeHtml(p.exam_title)}</b>
-            </td>
-            <td class="small">${escapeHtml(p.course_title)}</td>
-            <td class="small">${p.teacher_name ? escapeHtml(p.teacher_name) : '<span class="muted">—</span>'}</td>
-            <td style="white-space:nowrap">
-              <span style="display:inline-flex;gap:4px;align-items:center">
-                ${gateBadge("Q", qCnt)}
-                ${gateBadge("G", gCnt)}
-                ${gateBadge("R", rCnt)}
-              </span>
-            </td>
-            <td>
-              <a href="/sitting-gate-settings?sitting_id=${escapeAttr(sittingId)}&exam_id=${escapeAttr(p.exam_id)}"
-                 class="btn3" style="display:inline-block;padding:4px 10px;font-size:12px;text-decoration:none">Set Approvals</a>
-            </td>
-          </tr>`;
-      }).join("");
-
-      const approvalsPane = `
-        <div id="pane-approvals" class="pane ${activeTab === "approvals" ? "active" : ""}">
-          <div class="card">
-            <h2 style="margin:0 0 14px">Approval Gates</h2>
-            ${papers.length === 0 ? `
-              <p class="muted">No papers in this sitting yet. Add papers in the Papers tab first.</p>
-            ` : `
-              <table class="table">
-                <thead><tr><th>#</th><th>Paper</th><th>Course</th><th>Teacher</th><th>Gates</th><th></th></tr></thead>
-                <tbody>${approvalRows}</tbody>
-              </table>
-            `}
-          </div>
-        </div>`;
+      // Approvals tab removed — gate info is now on the Papers tab
 
       return page(`
         <style>
@@ -758,13 +731,11 @@ export async function handleSittingRequest(ctx) {
         <div class="sit-tabs">
           <button class="sit-tab ${activeTab === "settings"  ? "active" : ""}" onclick="showTab('settings',this)">&#9881;&#65039; Settings</button>
           <button class="sit-tab ${activeTab === "papers"    ? "active" : ""}" onclick="showTab('papers',this)">&#128196; Papers (${papers.length})</button>
-          <button class="sit-tab ${activeTab === "approvals" ? "active" : ""}" onclick="showTab('approvals',this)">&#10004; Approvals</button>
           <button class="sit-tab ${activeTab === "results"   ? "active" : ""}" onclick="showTab('results',this)">&#128202; Results</button>
         </div>
         <div class="sit-tab-body">
           ${settingsPane}
           ${papersPane}
-          ${approvalsPane}
           ${resultsPane}
         </div>
         <script>
