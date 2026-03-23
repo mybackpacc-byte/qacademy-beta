@@ -71,6 +71,14 @@ export async function handleAdminRequest(ctx) {
       return scope || "";
     }
 
+    function describeCode(scope, role, courseTitle) {
+      if (scope === "TENANT_ROLE" && role === "STUDENT") return "Students \u2192 join school";
+      if (scope === "TENANT_ROLE" && role === "TEACHER") return "Teachers \u2192 join school";
+      if (scope === "COURSE_ENROLL" && courseTitle) return `Students \u2192 enrol in ${courseTitle}`;
+      if (scope === "COURSE_TEACHER" && courseTitle) return `Teachers \u2192 assign to ${courseTitle}`;
+      return scopeLabel(scope) + " (" + roleLabel(role) + ")";
+    }
+
     async function loadJoinCodeByPlain(codePlain) {
       const h = await joinCodeHash(codePlain);
       const jc = await first(
@@ -421,10 +429,11 @@ export async function handleAdminRequest(ctx) {
       if (!course) return redirect("/school-courses");
 
       const tab = url.searchParams.get("tab") || "details";
-      const tabs = ["details", "teachers", "students", "classes"];
+      const tabs = ["details", "teachers", "students", "classes", "join-codes"];
+      const tabLabels = { "details": "Details", "teachers": "Teachers", "students": "Students", "classes": "Classes", "join-codes": "Join Codes" };
       const tabNav = tabs.map((t) => {
         const active_ = t === tab;
-        const label = t.charAt(0).toUpperCase() + t.slice(1);
+        const label = tabLabels[t] || t;
         return `<a href="/school-course?course_id=${escapeAttr(courseId)}&tab=${t}" style="padding:6px 12px;border-radius:8px;text-decoration:none;white-space:nowrap${active_ ? ";background:rgba(0,0,0,.07);font-weight:700" : ""}">${label}</a>`;
       }).join("");
 
@@ -622,6 +631,76 @@ export async function handleAdminRequest(ctx) {
         `;
       }
 
+      // --- Join Codes tab ---
+      if (tab === "join-codes") {
+        const courseCodes = await all(
+          `SELECT jc.*, c.title AS course_title FROM join_codes jc
+           LEFT JOIN courses c ON c.id=jc.course_id
+           WHERE jc.tenant_id=? AND jc.course_id=? AND jc.revoked=0
+           ORDER BY jc.created_at DESC`,
+          [active.tenant_id, courseId]
+        );
+        const activeCourseCodes = courseCodes.filter((c) => !isIsoInPast(c.expires_at));
+        const returnTo = `/school-course?course_id=${courseId}&tab=join-codes`;
+
+        const codeRows = activeCourseCodes.map((c) => `
+          <tr>
+            <td><b>${escapeHtml(describeCode(c.scope, c.role, c.course_title))}</b></td>
+            <td class="small">
+              Expires: ${escapeHtml(fmtISO(c.expires_at))}<br/>
+              Uses: ${escapeHtml(c.uses_approved)}/${escapeHtml(c.max_uses)}
+            </td>
+            <td><span class="pill">${Number(c.auto_approve) === 1 ? "Auto-approve" : "Needs approval"}</span></td>
+            <td>
+              <form method="post" action="/school-revoke-code" onsubmit="return confirm('Revoke this code?')">
+                <input type="hidden" name="code_id" value="${escapeAttr(c.id)}"/>
+                <input type="hidden" name="return_to" value="${escapeAttr(returnTo)}"/>
+                <button type="submit" class="btn3">Revoke</button>
+              </form>
+            </td>
+          </tr>
+        `).join("");
+
+        tabContent = `
+          <div class="card">
+            <h2>Join Codes for this Course</h2>
+            <table class="table">
+              <thead><tr><th>Description</th><th>Limits</th><th>Approval</th><th></th></tr></thead>
+              <tbody>${codeRows || `<tr><td colspan="4" class="muted">No active codes for this course</td></tr>`}</tbody>
+            </table>
+          </div>
+          <div class="card">
+            <h2>Create Code for this Course</h2>
+            <form method="post" action="/school-create-code">
+              <input type="hidden" name="action" value="course"/>
+              <input type="hidden" name="course_id" value="${escapeAttr(courseId)}"/>
+              <input type="hidden" name="return_to" value="${escapeAttr(returnTo)}"/>
+              <label>Who is this code for?</label>
+              <select name="who" required>
+                <option value="student">Student</option>
+                <option value="teacher">Teacher</option>
+              </select>
+              <div class="row">
+                <div>
+                  <label>Auto-approve</label>
+                  <select name="auto_approve">
+                    <option value="0">No (admin approval required)</option>
+                    <option value="1">Yes (instant)</option>
+                  </select>
+                </div>
+                <div>
+                  <label>Expiry (days)</label>
+                  <input name="exp_days" type="number" min="1" value="${JOIN_CODE_DEFAULT_EXP_DAYS}" required />
+                </div>
+              </div>
+              <label>Max uses</label>
+              <input name="max_uses" type="number" min="1" value="${JOIN_CODE_DEFAULT_MAX_USES}" required />
+              <button type="submit">Create code</button>
+            </form>
+          </div>
+        `;
+      }
+
       return page(`
         ${schoolHeader(r, active)}
         ${schoolNav("/school-courses")}
@@ -815,32 +894,23 @@ export async function handleAdminRequest(ctx) {
         [tenantId]
       );
 
-      const codesRows = codes.map((c) => {
-        const expired = isIsoInPast(c.expires_at);
-        const status = Number(c.revoked) === 1 ? "Revoked" : expired ? "Expired" : "Active";
-        return `
-          <tr>
-            <td>
-              <b>${escapeHtml(scopeLabel(c.scope))}</b><br/>
-              <span class="muted small">${escapeHtml(roleLabel(c.role))}${c.course_title ? ` • ${escapeHtml(c.course_title)}` : ""}</span>
-            </td>
-            <td class="small">
-              ${escapeHtml(fmtISO(c.expires_at))}<br/>
-              Uses: ${escapeHtml(c.uses_approved)}/${escapeHtml(c.max_uses)}<br/>
-              Auto: ${Number(c.auto_approve) === 1 ? "Yes" : "No"}
-            </td>
-            <td><span class="pill">${escapeHtml(status)}</span></td>
-            <td>
-              ${Number(c.revoked) === 1
-                ? `<span class="muted small">—</span>`
-                : `<form method="post" action="/school-revoke-code" onsubmit="return confirm('Revoke this code?')">
-                    <input type="hidden" name="code_id" value="${escapeAttr(c.id)}"/>
-                    <button type="submit" class="btn3">Revoke</button>
-                  </form>`}
-            </td>
-          </tr>
-        `;
-      }).join("");
+      const activeCodes = codes.filter((c) => Number(c.revoked) !== 1 && !isIsoInPast(c.expires_at));
+      const activeCodesRows = activeCodes.map((c) => `
+        <tr>
+          <td><b>${escapeHtml(describeCode(c.scope, c.role, c.course_title))}</b></td>
+          <td class="small">
+            Expires: ${escapeHtml(fmtISO(c.expires_at))}<br/>
+            Uses: ${escapeHtml(c.uses_approved)}/${escapeHtml(c.max_uses)}
+          </td>
+          <td><span class="pill">${Number(c.auto_approve) === 1 ? "Auto-approve" : "Needs approval"}</span></td>
+          <td>
+            <form method="post" action="/school-revoke-code" onsubmit="return confirm('Revoke this code?')">
+              <input type="hidden" name="code_id" value="${escapeAttr(c.id)}"/>
+              <button type="submit" class="btn3">Revoke</button>
+            </form>
+          </td>
+        </tr>
+      `).join("");
 
       const pending = await all(
         `SELECT jr.id, jr.type, jr.requested_role, jr.created_at,
@@ -863,12 +933,15 @@ export async function handleAdminRequest(ctx) {
         [tenantId]
       );
 
-      const pendingRows = pending.map((x) => `
+      const pendingRows = pending.map((x) => {
+        const reqDesc = x.course_title
+          ? `${escapeHtml(roleLabel(x.requested_role))} access to ${escapeHtml(x.course_title)}`
+          : `${escapeHtml(roleLabel(x.requested_role))} access to school`;
+        return `
         <tr>
           <td><b>${escapeHtml(x.user_name)}</b><br/><span class="muted small">${escapeHtml(x.user_email)}</span></td>
           <td class="small">
-            ${escapeHtml(x.type)} • ${escapeHtml(roleLabel(x.requested_role))}
-            ${x.course_title ? `<br/>Course: ${escapeHtml(x.course_title)}` : ``}
+            ${reqDesc}
             <br/><span class="muted">Requested: ${escapeHtml(fmtISO(x.created_at))}</span>
           </td>
           <td>
@@ -884,38 +957,52 @@ export async function handleAdminRequest(ctx) {
             </div>
           </td>
         </tr>
-      `).join("");
+      `;
+      }).join("");
 
-      const historyRows = history.map((x) => `
+      const historyRows = history.map((x) => {
+        const hDesc = x.course_title
+          ? `${escapeHtml(roleLabel(x.requested_role))} access to ${escapeHtml(x.course_title)}`
+          : `${escapeHtml(roleLabel(x.requested_role))} access to school`;
+        return `
         <tr>
           <td><b>${escapeHtml(x.user_name)}</b><br/><span class="muted small">${escapeHtml(x.user_email)}</span></td>
-          <td class="small">
-            ${escapeHtml(x.type)} • ${escapeHtml(roleLabel(x.requested_role))}
-            ${x.course_title ? `<br/>Course: ${escapeHtml(x.course_title)}` : ``}
-          </td>
+          <td class="small">${hDesc}</td>
           <td class="small">
             <span class="pill">${escapeHtml(x.status)}</span><br/>
             <span class="muted">Reviewed: ${escapeHtml(fmtISO(x.reviewed_at || ""))}</span>
           </td>
         </tr>
-      `).join("");
+      `;
+      }).join("");
 
       return page(`
         ${schoolHeader(r, active)}
         ${schoolNav("/school-join-codes")}
 
         <div class="card">
-          <h2>Join Codes</h2>
-          <p class="muted small">Codes are stored hashed; you'll see the plaintext code only at creation time.</p>
+          <h2>Active Codes</h2>
+          <p class="muted small">Codes are stored hashed — the plaintext is only shown at creation time.</p>
+          <table class="table">
+            <thead><tr><th>Description</th><th>Limits</th><th>Approval</th><th></th></tr></thead>
+            <tbody>${activeCodesRows || `<tr><td colspan="4" class="muted">No active codes</td></tr>`}</tbody>
+          </table>
+        </div>
+
+        <div class="card">
+          <h2>Create Code</h2>
           <form method="post" action="/school-create-code">
-            <label>Code type</label>
-            <select name="kind" required>
-              <option value="TENANT_STUDENT">Student (school-wide access)</option>
-              <option value="TENANT_TEACHER">Teacher (school-wide access)</option>
-              <option value="COURSE_ENROLL">Student (course enrol)</option>
-              <option value="COURSE_TEACHER">Teacher (course assignment)</option>
+            <label>Who is this code for?</label>
+            <select name="who" required>
+              <option value="student">Student</option>
+              <option value="teacher">Teacher</option>
             </select>
-            <label>Course (required for course codes)</label>
+            <label>What should happen when they join?</label>
+            <select name="action" required>
+              <option value="school">Join the school only</option>
+              <option value="course">Join the school AND enrol in a specific course</option>
+            </select>
+            <label>Course (only needed if enrolling in a course)</label>
             <select name="course_id">${courseOptions || "<option value=''>Create a course first</option>"}</select>
             <div class="row">
               <div>
@@ -934,25 +1021,21 @@ export async function handleAdminRequest(ctx) {
             <input name="max_uses" type="number" min="1" value="${JOIN_CODE_DEFAULT_MAX_USES}" required />
             <button type="submit">Create code</button>
           </form>
-          <h3 style="margin:14px 0 6px;font-size:14px">Existing codes</h3>
-          <table class="table">
-            <thead><tr><th>Type</th><th>Limits</th><th>Status</th><th></th></tr></thead>
-            <tbody>${codesRows || `<tr><td colspan="4" class="muted">No codes yet</td></tr>`}</tbody>
-          </table>
         </div>
 
         <div class="card">
-          <h2>Join Requests</h2>
-          <h3 style="margin:10px 0 6px;font-size:14px">Pending</h3>
+          <h2>Pending Requests</h2>
           <table class="table">
             <thead><tr><th>User</th><th>Request</th><th>Actions</th></tr></thead>
             <tbody>${pendingRows || `<tr><td colspan="3" class="muted">No pending requests</td></tr>`}</tbody>
           </table>
+          ${history.length > 0 ? `
           <h3 style="margin:14px 0 6px;font-size:14px">History</h3>
           <table class="table">
             <thead><tr><th>User</th><th>Request</th><th>Status</th></tr></thead>
-            <tbody>${historyRows || `<tr><td colspan="3" class="muted">No history yet</td></tr>`}</tbody>
+            <tbody>${historyRows}</tbody>
           </table>
+          ` : ""}
         </div>
       `);
     }
@@ -964,25 +1047,28 @@ export async function handleAdminRequest(ctx) {
       if (!active || active.role !== "SCHOOL_ADMIN") return redirect("/");
 
       const f = await form();
-      const kind = (f.kind || "").trim();
+      const who = (f.who || "").trim();
+      const action = (f.action || "").trim();
       const courseId = (f.course_id || "").trim();
+      const returnTo = (f.return_to || "").trim();
       const autoApprove = Number(f.auto_approve || "0") === 1 ? 1 : 0;
       const expDays = Math.max(1, parseInt(f.exp_days || `${JOIN_CODE_DEFAULT_EXP_DAYS}`, 10) || JOIN_CODE_DEFAULT_EXP_DAYS);
       const maxUses = Math.max(1, parseInt(f.max_uses || `${JOIN_CODE_DEFAULT_MAX_USES}`, 10) || JOIN_CODE_DEFAULT_MAX_USES);
+      const backLink = returnTo || "/school-join-codes";
 
       let scope = "", role = "", course_id = null;
-      if (kind === "TENANT_STUDENT") { scope = "TENANT_ROLE"; role = "STUDENT"; }
-      else if (kind === "TENANT_TEACHER") { scope = "TENANT_ROLE"; role = "TEACHER"; }
-      else if (kind === "COURSE_ENROLL") { scope = "COURSE_ENROLL"; role = "STUDENT"; course_id = courseId || null; }
-      else if (kind === "COURSE_TEACHER") { scope = "COURSE_TEACHER"; role = "TEACHER"; course_id = courseId || null; }
-      else return redirect("/school-join-codes");
+      if (who === "student" && action === "school") { scope = "TENANT_ROLE"; role = "STUDENT"; }
+      else if (who === "student" && action === "course") { scope = "COURSE_ENROLL"; role = "STUDENT"; course_id = courseId || null; }
+      else if (who === "teacher" && action === "school") { scope = "TENANT_ROLE"; role = "TEACHER"; }
+      else if (who === "teacher" && action === "course") { scope = "COURSE_TEACHER"; role = "TEACHER"; course_id = courseId || null; }
+      else return redirect(backLink);
 
       if ((scope === "COURSE_ENROLL" || scope === "COURSE_TEACHER") && !course_id) {
-        return page(`<div class="card err"><b>Please select a course for course codes.</b></div><p><a href="/school-join-codes">Back</a></p>`, 400);
+        return page(`<div class="card err"><b>Please select a course.</b></div><p><a href="${escapeAttr(backLink)}">Back</a></p>`, 400);
       }
       if (scope === "COURSE_ENROLL" || scope === "COURSE_TEACHER") {
         const c = await first("SELECT id FROM courses WHERE id=? AND tenant_id=? AND status='ACTIVE'", [course_id, active.tenant_id]);
-        if (!c) return page(`<div class="card err"><b>Course not found or inactive.</b></div><p><a href="/school-join-codes">Back</a></p>`, 400);
+        if (!c) return page(`<div class="card err"><b>Course not found or inactive.</b></div><p><a href="${escapeAttr(backLink)}">Back</a></p>`, 400);
       }
 
       const expiresAt = new Date(Date.now() + expDays * 24 * 60 * 60 * 1000).toISOString();
@@ -1013,7 +1099,7 @@ export async function handleAdminRequest(ctx) {
             <div style="font-size:28px;font-weight:900;letter-spacing:.08em">${escapeHtml(codePlain)}</div>
           </div>
           <p class="muted">Users go to <b>/join</b>, enter the code, then login/create account.</p>
-          <p class="actions"><a href="/school-join-codes">Back to Join Codes</a></p>
+          <p class="actions"><a href="${escapeAttr(backLink)}">Back</a></p>
         </div>
       `);
     }
@@ -1025,9 +1111,10 @@ export async function handleAdminRequest(ctx) {
       if (!active || active.role !== "SCHOOL_ADMIN") return redirect("/");
       const f = await form();
       const codeId = (f.code_id || "").trim();
+      const returnTo = (f.return_to || "").trim();
       if (!codeId) return redirect("/school-join-codes");
       await run("UPDATE join_codes SET revoked=1, updated_at=? WHERE id=? AND tenant_id=?", [nowISO(), codeId, active.tenant_id]);
-      return redirect("/school-join-codes");
+      return redirect(returnTo || "/school-join-codes");
     }
 
     if (path === "/school-approve-request" && request.method === "POST") {
